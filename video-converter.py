@@ -52,47 +52,52 @@ def extract_streams(input_file, output_dir):
 
     for track in tracks:
         if track["track_type"] == 'audio':
-            out_audio = os.path.join(output_dir, f"audio_{track['track_id']}.{track['codec_id'].split('/')[-1]}")
-            cmd = [
-                "mkvextract", "tracks", input_file,
-                f"{track['track_id']}:{out_audio}"
-            ]
-            subprocess.run(cmd, check=True)
-            # Only extract French audio and subtitles
-            if hasattr(track, "language") and track["language"] and track["language"].lower().startswith("fr"):
+            # Only extract French audio and original language (if not French)
+            lang = track.get("language", "").lower()
+            if lang.startswith("fr") or lang == "":
+                # Add language to output filename
+                lang_suffix = lang if lang else "orig"
+                out_audio = os.path.join(
+                    output_dir,
+                    f"audio_{track['track_id']}_{lang_suffix}.{track['codec_id'].split('/')[-1]}"
+                )
+                cmd = [
+                    "mkvextract", "tracks", input_file,
+                    f"{track['track_id']}:{out_audio}"
+                ]
+                subprocess.run(cmd, check=True)
                 audio_files.append(out_audio)
         elif track["track_type"] == 'subtitles':
-            # Only extract French subtitles
-            if hasattr(track, "language") and track["language"] and track["language"].lower().startswith("fr"):
+            # Only extract French subtitles, skip audio description tracks
+            lang = track.get("language", "").lower()
+            desc = (track.get("track_name") or "").lower()
+            if lang.startswith("fr") and not (
+                "audio" in desc or "description" in desc or "audiodescription" in desc or "frh" in desc or "audio desc" in desc
+            ):
                 # Identify subtitle type
-                desc = (track["track_name"] or "").lower() if hasattr(track, "track_name") and track["track_name"] else ""
                 if "for" in desc:
                     sub_type = "forced"
                 elif "full" in desc or "complet" in desc:
                     sub_type = "full"
-                elif "audio" in desc or "description" in desc \
-                    or "audiodescription" in desc \
-                    or "frh" in desc \
-                        or "audio desc" in desc:
-                    sub_type = "audio_desc"
                 else:
                     sub_type = "unknown"
                 # Determine extension based on codec_id
-                if "SubRip" in track.codec_id:
+                codec_id = track.get("codec_id", "")
+                if "SubRip" in codec_id:
                     ext = "srt"
-                elif "ASS" in track.codec_id:
+                elif "ASS" in codec_id:
                     ext = "ass"
-                elif "HDMV PGS" in track.codec_id \
-                    or "VobSub" in track.codec_id \
-                    or "PGS" in track.codec_id \
-                        or "SUP" in track.codec_id:
+                elif "HDMV PGS" in codec_id or "VobSub" in codec_id or "PGS" in codec_id or "SUP" in codec_id:
                     ext = "sup"
                 else:
                     ext = "sub"
-                out_sub = os.path.join(output_dir, f"subtitle_{track.track_id}_fr_{sub_type}.{ext}")
+                out_sub = os.path.join(
+                    output_dir,
+                    f"subtitle_{track['track_id']}_fr_{sub_type}.{ext}"
+                )
                 cmd = [
                     "mkvextract", "tracks", input_file,
-                    f"{track.track_id}:{out_sub}"
+                    f"{track['track_id']}:{out_sub}"
                 ]
                 subprocess.run(cmd, check=True)
                 subtitle_files.append(out_sub)
@@ -164,19 +169,20 @@ def get_video_duration(input_file):
 def get_video_bitrate(file_path):
     # Get bitrate in kbps using ffprobe
     cmd = [
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=bit_rate", 
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=bit_rate", 
         "-of", "default=noprint_wrappers=1:nokey=1", file_path
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
                             text=True)
     bitrate = result.stdout.strip()
-    if bitrate:
+    # If bitrate is missing or N/A, calculate from file size and duration
+    if bitrate and bitrate.upper() != "N/A":
         return int(bitrate) // 1000  # Convert to kbps
-    # fallback: calculate bitrate from file size and duration
-    size_kb = os.path.getsize(file_path) // 1024
+    size_bytes = os.path.getsize(file_path)
     duration = get_video_duration(file_path)
-    return int(size_kb * 8 / duration)  # kbps
+    # Calculate bitrate in kbps (kilobits per second)
+    return int((size_bytes * 8) / 1000 / duration)
 
 def reencode_video(input_file, output_file):
     # Limit to 1/3 of CPU threads for x265
@@ -186,11 +192,11 @@ def reencode_video(input_file, output_file):
         test_start = 0
     else:
         test_start = random.randint(0, int(duration) - 61)
-    test_file = output_file + ".test.mkv"
     crf = 21
     min_crf, max_crf = 19, 22
     x265_params = f"vbv-maxrate=6000:vbv-bufsize=6000:early-skip=0:b-intra=0:deblock=-3,-3:pools={num_threads}"
     for _ in range(6):  # Limit to 6 tries
+        test_file = f"{output_file}.crf{crf}.test.mkv"
         # Encode 1 minute sample
         cmd = [
             "ffmpeg", "-ss", str(test_start), "-hwaccel", "auto", "-i", input_file,
@@ -214,7 +220,6 @@ def reencode_video(input_file, output_file):
             crf -= 1
         else:
             break
-    os.remove(test_file)
     # Encode full file with chosen crf
     cmd = [
         "ffmpeg", "-hwaccel", "auto", "-i", input_file,
