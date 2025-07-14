@@ -50,13 +50,21 @@ def extract_streams(input_file, output_dir):
     audio_files = []
     subtitle_files = []
 
+    #debug
+    print(f"Found {len(tracks)} tracks in {input_file}")
+    print("Track details:")
+    print("ID\tType\tCodec\tLanguage\tName")
+    for track in tracks:
+        print(f"{track['track_id']}\t{track['track_type']}\t{track['codec_id']}\t{track.get('language', '')}\t{track.get('track_name', '')}")
+
     for track in tracks:
         if track["track_type"] == 'audio':
             # Only extract French audio and original language (if not French)
             lang = track.get("language", "").lower()
-            if lang.startswith("fr") or lang == "":
+            desc = (track.get("track_name") or "").lower()
+            if (lang.startswith("fr") or lang == "") and "descrip" not in desc:
                 # Add language to output filename
-                lang_suffix = lang if lang else "orig"
+                lang_suffix = lang if lang else "eng"
                 out_audio = os.path.join(
                     output_dir,
                     f"audio_{track['track_id']}_{lang_suffix}.{track['codec_id'].split('/')[-1]}"
@@ -72,7 +80,7 @@ def extract_streams(input_file, output_dir):
             lang = track.get("language", "").lower()
             desc = (track.get("track_name") or "").lower()
             if lang.startswith("fr") and not (
-                "audio" in desc or "description" in desc or "audiodescription" in desc or "frh" in desc or "audio desc" in desc
+                "descrip" in desc or "frh" in desc
             ):
                 # Identify subtitle type
                 if "for" in desc:
