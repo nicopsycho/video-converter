@@ -54,16 +54,14 @@ def extract_streams(input_file, output_dir):
             lang = track['properties'].get("language", "").lower()
             desc = (track['properties'].get("track_name") or "").lower()
             forced = track['properties'].get("forced_track", False)
-            if lang.startswith("fr") and not (
-                "descrip" in desc or "frh" in desc
-            ):
+            if lang.startswith("fr"):
                 # Identify subtitle type
                 if "for" in desc or forced:
                     sub_type = "forced"
-                elif "full" in desc or "complet" in desc:
-                    sub_type = "full"
+                elif "descrip" in desc or "frh" in desc:
+                    sub_type = "audio_desc"
                 else:
-                    sub_type = "unknown"
+                     sub_type = "full"
                 # Determine extension based on codec_id
                 codec_id = track.get("codec", "")
                 if "SubRip" in codec_id:
@@ -224,9 +222,28 @@ def remux_to_mkv(video_file, audio_files, subtitle_files, output_file):
 
     # Add audio tracks
     for idx, audio in enumerate(audio_files):
-        lang = "fra"
-        name = f"French AAC {idx+1}"
-        cmd += ["--language", f"0:{lang}", "--track-name", f"0:{name}", audio]
+        # Example audio filename: audio_2_frq.aac.m4a or audio_1_eng.aac.m4a
+        base = os.path.basename(audio)
+        m = re.match(r"audio_\d+_([a-z]{2,3})(?:_([a-z_]+))?", base)
+        if m:
+            lang = m.group(1)
+            sub_type = m.group(2) if m.group(2) else ""
+        else:
+            lang = "und"
+            sub_type = ""
+        # Map language codes if needed
+        lang_map = {"fr": "fra", "frq": "fra", "eng": "eng"}
+        lang_mkv = lang_map.get(lang, lang)
+        # Name track
+        if sub_type == "forced":
+            name = f"{lang_mkv.upper()} Forced"
+        elif sub_type == "full":
+            name = f"{lang_mkv.upper()} Full"
+        elif sub_type:
+            name = f"{lang_mkv.upper()} {sub_type.capitalize()}"
+        else:
+            name = f"{lang_mkv.upper()} AAC {idx+1}"
+        cmd += ["--language", f"0:{lang_mkv}", "--track-name", f"0:{name}", audio]
 
     # Group subtitles by type and language
     sub_tracks = []
@@ -295,13 +312,19 @@ def main():
     print(f"Extracted audio: {audio_files}")
     print(f"Extracted subtitles: {subtitle_files}")
 
+    # Check if we have any audio or subtitle files to process
+    if not audio_files and not subtitle_files:
+        print("No audio or subtitle streams found to process.")
+    else:
+        print(f"Found {len(audio_files)} audio files and {len(subtitle_files)} subtitle files.")
+        reencode_audio(input_file, audio_files)
+        print("Reencoding audio streams completed.")
+    
+    # Reencode video stream to h265
     output_video = os.path.splitext(input_file)[0] + "_h265.mkv"
     print("Reencoding video stream to h265...")
     reencode_video(input_file, output_video)
     print(f"Reencoded video saved as: {output_video}")
-
-    reencode_audio(input_file, audio_files)
-    print("Reencoding audio streams completed.")
 
     # Call the remux function
     remuxed_output = os.path.splitext(input_file)[0] + "_final.mkv"
