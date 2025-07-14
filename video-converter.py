@@ -7,9 +7,9 @@ import multiprocessing
 import json
 
 EAC3TO_CMD = (
-    "wine /home/nicolas/tools/eac3to/eac3to.exe"
+    ["wine", "/home/nicolas/tools/eac3to/eac3to.exe"]
     if os.name != "nt"
-    else r"G:\TOOLS\eac3to\eac3to.exe"
+    else [r"G:\TOOLS\eac3to\eac3to.exe"]
 )
 
 def extract_streams(input_file, output_dir):
@@ -114,8 +114,8 @@ def reencode_audio(input_file, audio_files):
             channel_opts = "-down6" if channels > 6 else ""
 
         # Use eac3to to encode to HE-AAC (if available)
-        eac3to_cmd = [
-            EAC3TO_CMD, audio_file, f"{out_audio}", "-quality=0.25", "5db", channel_opts, "-log=NUL"
+        eac3to_cmd = EAC3TO_CMD + [
+            audio_file, f"{out_audio}", "-quality=0.25", "5db", channel_opts, "-log=NUL"
         ]
         subprocess.run(eac3to_cmd, check=True)
         audio_cmds.append(out_audio)
