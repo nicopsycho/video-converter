@@ -97,22 +97,6 @@ def extract_streams(input_file, output_dir):
                 subprocess.run(cmd, check=True)
                 subtitle_files.append(out_sub)
 
-            # Determine extension based on codec_id
-            if "SubRip" in track.codec_id:
-                ext = "srt"
-            elif "ASS" in track.codec_id:
-                ext = "ass"
-            elif "HDMV PGS" in track.codec_id or "VobSub" in track.codec_id or "PGS" in track.codec_id or "SUP" in track.codec_id:
-                ext = "sup"
-            else:
-                ext = "sub"
-            out_sub = os.path.join(output_dir, f"subtitle_{track.track_id}.{ext}")
-            cmd = [
-                "mkvextract", "tracks", input_file,
-                f"{track.track_id}:{out_sub}"
-            ]
-            subprocess.run(cmd, check=True)
-            subtitle_files.append(out_sub)
     return audio_files, subtitle_files
 
 def reencode_audio(input_file, audio_files):
