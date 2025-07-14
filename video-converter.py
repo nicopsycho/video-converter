@@ -48,13 +48,13 @@ def extract_streams(input_file, output_dir):
                 lang_suffix = lang if lang else "eng"
                 if "q" in desc and lang.startswith("fr"):
                     lang_suffix = "frq"
-                    
+
                 extension = track['properties']['codec_id'].split('/')[-1]
                 if extension == "AAC":
                     extension = "m4a"
                 elif extension == "AC-3":
                     extension = "ac3"
-                elif extension == "E-AC-3":
+                elif extension == "E_AC3":
                     extension = "eac3"
                 elif extension == "TrueHD":
                     extension = "thd"
