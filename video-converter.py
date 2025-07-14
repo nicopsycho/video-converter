@@ -12,6 +12,9 @@ EAC3TO_CMD = (
     else [r"G:\TOOLS\eac3to\eac3to.exe"]
 )
 
+EAC3TO_PREFIX = "z:" if os.name != "nt" else ""
+
+
 def extract_streams(input_file, output_dir):
     # Use mkvmerge to get track info
     cmd = [
@@ -115,7 +118,8 @@ def reencode_audio(input_file, audio_files):
 
         # Use eac3to to encode to HE-AAC (if available)
         eac3to_cmd = EAC3TO_CMD + [
-            audio_file, f"{out_audio}", "-quality=0.25", "5db", channel_opts, "-log=NUL"
+            f"{EAC3TO_PREFIX}{audio_file}", f"{EAC3TO_PREFIX}{out_audio}", 
+            "-quality=0.25", "5db", channel_opts, "-log=NUL"
         ]
         subprocess.run(eac3to_cmd, check=True)
         audio_cmds.append(out_audio)
