@@ -32,8 +32,8 @@ def extract_streams(input_file, output_dir):
     for track in tracks:
         if track["type"] == 'audio':
             # Only extract French audio and original language (if not French)
-            lang = track.get("language", "").lower()
-            desc = (track.get("track_name") or "").lower()
+            lang = track['properties'].get("language", "").lower()
+            desc = (track['properties'].get("track_name") or "").lower()
             if "descrip" not in desc:
                 # Add language to output filename
                 lang_suffix = lang if lang else "eng"
@@ -51,9 +51,9 @@ def extract_streams(input_file, output_dir):
                 audio_files.append(out_audio)
         elif track["type"] == 'subtitles':
             # Only extract French subtitles, skip audio description tracks
-            lang = track.get("language", "").lower()
-            desc = (track.get("track_name") or "").lower()
-            forced = track.get("properties", {}).get("forced_track", False)
+            lang = track['properties'].get("language", "").lower()
+            desc = (track['properties'].get("track_name") or "").lower()
+            forced = track['properties'].get("forced_track", False)
             if lang.startswith("fr") and not (
                 "descrip" in desc or "frh" in desc
             ):
