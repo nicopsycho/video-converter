@@ -4,48 +4,20 @@ import subprocess
 import random
 import re
 import multiprocessing
+import json
 
 def extract_streams(input_file, output_dir):
     # Use mkvmerge to get track info
     cmd = [
-        "mkvmerge", "-i", input_file
+        "mkvmerge", "-J", input_file
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    tracks = []
-    for line in result.stdout.splitlines():
-        # Example: Track ID 0: video (HEVC)
-        m = re.match(r"Track ID (\d+): (\w+) \(([^)]+)\)(?: \((.+)\))?", line)
-        if m:
-            track_id = int(m.group(1))
-            track_type = m.group(2)
-            codec_id = m.group(3)
-            # mkvmerge -i does not provide language or name, so we get them with mkvmerge --identify-verbose
-            tracks.append({"track_id": track_id, "track_type": track_type, "codec_id": codec_id})
-
-    # Get language and track name using mkvmerge --identify-verbose
-    cmd = [
-        "mkvmerge", "--identify-verbose", input_file
-    ]
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    lang_map = {}
-    name_map = {}
-    for line in result.stdout.splitlines():
-        # Example: Track ID 1: audio (A_AAC) [language:fra] [name:French]
-        m = re.match(r"Track ID (\d+): (\w+) \([^)]+\)(?: \[language:([^\]]+)\])?(?: \[name:([^\]]+)\])?", line)
-        if m:
-            tid = int(m.group(1))
-            lang = m.group(3)
-            name = m.group(4)
-            if lang:
-                lang_map[tid] = lang
-            if name:
-                name_map[tid] = name
-
-    # Attach language and name to tracks
-    for t in tracks:
-        t["language"] = lang_map.get(t["track_id"], "")
-        t["track_name"] = name_map.get(t["track_id"], "")
-
+    info = json.loads(result.stdout)
+    tracks = info.get("tracks", [])
+    if not tracks:
+        print(f"No tracks found in {input_file}")
+        return [], []
+    
     # Now, tracks is a list of dicts similar to MKVFile.tracks
     audio_files = []
     subtitle_files = []
@@ -55,42 +27,45 @@ def extract_streams(input_file, output_dir):
     print("Track details:")
     print("ID\tType\tCodec\tLanguage\tName")
     for track in tracks:
-        print(f"{track['track_id']}\t{track['track_type']}\t{track['codec_id']}\t{track.get('language', '')}\t{track.get('track_name', '')}")
+        print(f"{track['id']}\t{track['type']}\t{track['codec']}\t{track['properties'].get('language', '')}\t{track['properties'].get('track_name', '')}")
 
     for track in tracks:
-        if track["track_type"] == 'audio':
+        if track["type"] == 'audio':
             # Only extract French audio and original language (if not French)
             lang = track.get("language", "").lower()
             desc = (track.get("track_name") or "").lower()
-            if (lang.startswith("fr") or lang == "") and "descrip" not in desc:
+            if "descrip" not in desc:
                 # Add language to output filename
                 lang_suffix = lang if lang else "eng"
+                if "q" in desc and lang.startswith("fr"):
+                    lang_suffix = "frq"
                 out_audio = os.path.join(
                     output_dir,
-                    f"audio_{track['track_id']}_{lang_suffix}.{track['codec_id'].split('/')[-1]}"
+                    f"audio_{track['id']}_{lang_suffix}.{track['properties']['codec_id'].split('/')[-1]}"
                 )
                 cmd = [
                     "mkvextract", "tracks", input_file,
-                    f"{track['track_id']}:{out_audio}"
+                    f"{track['id']}:{out_audio}"
                 ]
                 subprocess.run(cmd, check=True)
                 audio_files.append(out_audio)
-        elif track["track_type"] == 'subtitles':
+        elif track["type"] == 'subtitles':
             # Only extract French subtitles, skip audio description tracks
             lang = track.get("language", "").lower()
             desc = (track.get("track_name") or "").lower()
+            forced = track.get("properties", {}).get("forced_track", False)
             if lang.startswith("fr") and not (
                 "descrip" in desc or "frh" in desc
             ):
                 # Identify subtitle type
-                if "for" in desc:
+                if "for" in desc or forced:
                     sub_type = "forced"
                 elif "full" in desc or "complet" in desc:
                     sub_type = "full"
                 else:
                     sub_type = "unknown"
                 # Determine extension based on codec_id
-                codec_id = track.get("codec_id", "")
+                codec_id = track.get("codec", "")
                 if "SubRip" in codec_id:
                     ext = "srt"
                 elif "ASS" in codec_id:
@@ -101,11 +76,11 @@ def extract_streams(input_file, output_dir):
                     ext = "sub"
                 out_sub = os.path.join(
                     output_dir,
-                    f"subtitle_{track['track_id']}_fr_{sub_type}.{ext}"
+                    f"subtitle_{track['id']}_fr_{sub_type}.{ext}"
                 )
                 cmd = [
                     "mkvextract", "tracks", input_file,
-                    f"{track['track_id']}:{out_sub}"
+                    f"{track['id']}:{out_sub}"
                 ]
                 subprocess.run(cmd, check=True)
                 subtitle_files.append(out_sub)
