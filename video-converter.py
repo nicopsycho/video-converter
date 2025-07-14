@@ -103,36 +103,15 @@ def reencode_audio(input_file, audio_files):
 
         # Determine channel layout
         if has_season_episode(os.path.basename(input_file)):
-            channel_opts = ["-ac", "2"]
+            channel_opts = "-down2"
         else:
-            channel_opts = ["-ac", "6"] if channels > 6 else ["-ac", str(channels)]
+            channel_opts = "-down6" if channels > 6 else ""
 
-        # Analyze max volume
-        vol_cmd = [
-            "ffmpeg", "-i", audio_file, "-af", "volumedetect", "-vn", "-sn", "-dn",
-            "-f", "null", "-"
+        # Use eac3to to encode to HE-AAC (if available)
+        eac3to_cmd = [
+            "eac3to", audio_file, f"{out_audio}", "-quality=0.25", "5db", channel_opts, "-log=NUL"
         ]
-        vol_proc = subprocess.run(vol_cmd, stderr=subprocess.PIPE, text=True)
-        max_vol = -1.0
-        for line in vol_proc.stderr.splitlines():
-            if "max_volume:" in line:
-                try:
-                    max_vol = float(line.split("max_volume:")[1].split(" dB")[0].strip())
-                except Exception:
-                    pass
-
-        # Try to increase gain by 6dB, but not above 0dB
-        gain = 6.0
-        if max_vol + gain > 0:
-            gain = -max_vol  # so max is 0dB
-
-        ffmpeg_cmd = [
-            "ffmpeg", "-i", audio_file, *channel_opts,
-            "-c:a", "libfdk_aac", "-profile:a", "aac_he_v2",
-            "-af", f"volume={gain}dB",
-            "-y", out_audio
-        ]
-        subprocess.run(ffmpeg_cmd, check=True)
+        subprocess.run(eac3to_cmd, check=True)
         audio_cmds.append(out_audio)
 
     print(f"Converted audio tracks: {audio_cmds}")
