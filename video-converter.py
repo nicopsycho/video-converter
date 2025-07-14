@@ -6,6 +6,12 @@ import re
 import multiprocessing
 import json
 
+EAC3TO_CMD = (
+    "wine /home/nicolas/tools/eac3to/eac3to.exe"
+    if os.name != "nt"
+    else r"G:\TOOLS\eac3to\eac3to.exe"
+)
+
 def extract_streams(input_file, output_dir):
     # Use mkvmerge to get track info
     cmd = [
@@ -109,7 +115,7 @@ def reencode_audio(input_file, audio_files):
 
         # Use eac3to to encode to HE-AAC (if available)
         eac3to_cmd = [
-            "eac3to", audio_file, f"{out_audio}", "-quality=0.25", "5db", channel_opts, "-log=NUL"
+            EAC3TO_CMD, audio_file, f"{out_audio}", "-quality=0.25", "5db", channel_opts, "-log=NUL"
         ]
         subprocess.run(eac3to_cmd, check=True)
         audio_cmds.append(out_audio)
