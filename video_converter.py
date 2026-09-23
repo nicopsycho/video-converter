@@ -5,11 +5,6 @@ import re
 import subprocess
 import typing
 
-# TUI Library
-import textual.app
-import textual.containers
-import textual.widgets
-
 LINUX_EXECUTABLE_PATHS = {
     "ffprobe": "/mnt/g/TOOLS/ffmpeg/bin/ffprobe.exe",
     "ffmpeg": "/mnt/g/TOOLS/ffmpeg/bin/ffmpeg.exe",
@@ -78,209 +73,134 @@ class MediaFile:
         self.selected_video_tracks: list[str] = []
 
 # --- Main Application ---
-class VideoConverterApp(textual.app.App):
-    """The main Textual application for the TUI."""
-    CSS = """
-    #main_container {
-        height: 100%;
-        width: 100%;
-    }
-    #media_list {
-        height: 80%;
-        width: 100%;
-        border: heavy $primary;
-    }
-    #stream_details {
-        height: 20%;
-        width: 100%;
-        border: heavy $secondary;
-    }
-    """
+def main():
+    """Main entry point for the CLI video converter."""
+    config = Config()
+    media_files: list[MediaFile] = []
+    
+    # Scan media files
+    scan_dir: str = config.scan_paths[0] if config.scan_paths else os.getcwd()
+    print(f"Scanning directory: {scan_dir}")
 
-    # BINDINGS: list[textual.app.Binding | tuple[str, str] | tuple[str, str, str]] = [
-    BINDINGS: list[textual.app.Binding | tuple[str, str] | tuple[str, str, str]] = [
-        ("q", "quit", "Quit"),
-        ("enter", "update_details", "Update Details"),
-    ]
+    if not os.path.isdir(scan_dir):
+        print(f"Error: Scan directory not found at {scan_dir}")
+        return
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.BINDINGS: list[textual.app.Binding | tuple[str, str] | tuple[str, str, str]] = [
-            ("q", "quit", "Quit"),
-            ("enter", "update_details", "Update Details"),
-        ]
-
-    def compose(self) -> textual.app.ComposeResult:
-        yield textual.widgets.Header()
-        yield textual.containers.Container(
-            textual.widgets.ListView(id="media_list"),
-            textual.widgets.Static(id="stream_details", markup=True)
-        )
-        yield textual.widgets.Footer()
-
-    def on_mount(self) -> None:
-        self.config = Config()
-        self.media_files: list[MediaFile] = []
-        self.selected_media_index: int = 0
-        self.scan_media_files()
-        self.log(f"Application mounted. Found {len(self.media_files)} media files.")
-        self.media_list_widget: textual.widgets.ListView = self.query_one("#media_list", textual.widgets.ListView)
-        
-        if self.media_files:
-            self.media_list_widget.clear()
-            for media_file in self.media_files:
-                item = textual.widgets.ListItem(textual.widgets.Static(media_file.standardized_id))
-                item.data = media_file
-                self.media_list_widget.append(item)
-        else:
-            self.media_list_widget.clear()
-            self.media_list_widget.append(textual.widgets.ListItem(textual.widgets.Static("No media files found in the current directory.")))
-
-        self.update_stream_details(None) # Initialize details panel as empty
-
-    # def action_update_details(self) -> None:
-    #     """Action to update stream details on Enter press."""
-    #     media_list_widget: textual.widgets.ListView = self.query_one("#media_list", textual.widgets.ListView)
-    #     self.update_stream_details(media_list_widget.index)
-    #     self.media_list_widget.clear()
-    #     self.media_list_widget.append(textual.widgets.ListItem(textual.widgets.Static("No media files found in the current directory.")))
-
-    #     self.update_stream_details(None) # Initialize details panel as empty
-
-    def action_update_details(self) -> None:
-        """Action to update stream details on Enter press."""
-        media_list_widget: textual.widgets.ListView = self.query_one("#media_list", textual.widgets.ListView)
-        self.update_stream_details(media_list_widget.index)
-
-    def update_media_list(self) -> None:
-        """Updates the media list Static widget with the current list of files."""
-        media_list_widget: textual.widgets.Static = self.query_one("#media_list", textual.widgets.Static)
-        media_list_widget.update(self.get_media_list_markup())
-
-    def scan_media_files(self) -> None:
-        """Scans the current directory for media files and extracts metadata."""
-        scan_dir: str = self.config.scan_paths[0] if self.config.scan_paths else os.getcwd()
-
-        print(f"Scanning directory: {scan_dir}")
-
-        if not os.path.isdir(scan_dir):
-            self.log(f"Error: Scan directory not found at {scan_dir}")
-            return
-
-        for filename in os.listdir(scan_dir):
-            if filename.endswith(('.mkv', '.mp4', '.avi')):
-                file_path: str = os.path.join(scan_dir, filename)
-                
-                # 1. Parse filename
-                standardized_id, media_type = parse_filename(filename)
-                
-                # 2. Extract stream info
-                metadata: dict[str, typing.Any] = extract_stream_info(file_path)
-                
-                if metadata:
-                    # 3. Create MediaFile object
-                    media_file = MediaFile(file_path, standardized_id, media_type, metadata)
-                    self.media_files.append(media_file)
-
-    def update_stream_details(self, selected_index: int) -> None:
-        """Updates the stream details Static widget based on the selected file index."""
-        self.selected_media_index = selected_index
-        stream_details_widget: textual.widgets.Static = self.query_one("#stream_details", textual.widgets.Static)
-        
-        if selected_index is None or selected_index < 0 or selected_index >= len(self.media_files):
-            stream_details_widget.update("Select a media file from the list to view its stream metadata.")
-            return
-
-        media_file: MediaFile = self.media_files[selected_index]
-        stream_details_widget.update(self.display_stream_details(media_file))
-
-    def on_media_list_selected(self, event: textual.widgets.ListView.Selected) -> None:
-        """Handles selection event from the media list and updates details automatically."""
-        self.log(f"ListView selected: {event.value}")
-        self.log(f"ListView selected: {event.value}")
-        selected_item = event.value
-        if hasattr(selected_item, 'data') and isinstance(selected_item.data, MediaFile):
-            media_file = selected_item.data
-        else:
-            self.log("Warning: Selected item does not contain valid media data.")
-
-    def get_media_list_markup(self) -> str:
-        """Generates the markup for the media file list."""
-        if not self.media_files:
-            return "No media files found in the current directory."
-        
-        list_markup = []
-        for i, media_file in enumerate(self.media_files):
-            # Display ID, Type, and original filename
-            list_markup.append(f"[{i+1}] {media_file.standardized_id} ({media_file.media_type}) - {os.path.basename(media_file.path)}")
-        
-        return "\n".join(list_markup)
-
-    def display_stream_details(self, media_file: MediaFile) -> textual.containers.Container:
-        """Generates the interactive widget structure for the selected media file's stream details and selection."""
-        if not media_file.metadata.get('streams'):
-            return textual.widgets.Static("No stream metadata available for this file.")
-
-        streams = media_file.metadata['streams']
-        
-        # Group streams by type for easier selection
-        audio_streams: list[typing.Any] = [s for s in streams if s['codec_type'] == 'audio']
-        video_streams: list[typing.Any] = [s for s in streams if s['codec_type'] == 'video']
-        subtitle_streams: list[typing.Any] = [s for s in streams if s['codec_type'] == 'subtitle']
-
-        # --- Widget Builders ---
-
-        def build_stream_list(title: str, streams: list[dict[str, typing.Any]], stream_type: str) -> textual.containers.Container:
-            """Helper to build a selectable list of streams."""
-            stream_container = textual.containers.Container()
-            stream_container.add(textual.widgets.Static(f"**{title} Streams:**"))
+    for filename in os.listdir(scan_dir):
+        if filename.endswith(('.mkv', '.mp4', '.avi')):
+            file_path: str = os.path.join(scan_dir, filename)
             
-            if not streams:
-                stream_container.add(textual.widgets.Static("  No streams of this type found."))
-                return stream_container
+            # 1. Parse filename
+            standardized_id, media_type = parse_filename(filename)
+            
+            # 2. Extract stream info
+            metadata: dict[str, typing.Any] = extract_stream_info(file_path)
+            
+            if metadata:
+                # 3. Create MediaFile object
+                media_file = MediaFile(file_path, standardized_id, media_type, metadata)
+                media_files.append(media_file)
 
-            # Use a Tree widget for selection capability
-            stream_tree = textual.widgets.Tree()
-            stream_tree.add_children([
-                textual.widgets.Tree.TreeItem(
-                    f"--- {stream_type.capitalize()} Streams ---", 
-                    children=[
-                        textual.widgets.Tree.TreeItem(
-                            f"[{i+1}] Codec: {s['codec_name']} | Language: {s['language']} | Details: {self._get_stream_details_summary(s, stream_type)}",
-                            id=f"{stream_type}_{i}"
-                        ) for i, s in enumerate(streams)
-                    ]
-                )
-            ])
-            stream_container.add(stream_tree)
-            return stream_container
+    if not media_files:
+        print("No media files found in the current directory.")
+        return
 
-        def _get_stream_details_summary(s: dict[str, typing.Any], stream_type: str) -> str:
-            """Generates a concise summary string for a stream."""
-            if stream_type == 'video':
-                return f"Resolution: {s.get('width')}x{s.get('height')} | Bitrate: {s.get('bit_rate')}"
-            elif stream_type == 'audio':
-                forced_tag: str = " (FORCED)" if s.get('is_forced') else ""
-                return f"Channels: {s.get('channels')} {forced_tag}"
-            elif stream_type == 'subtitle':
-                full_tag: str = " (FULL)" if s.get('is_full') else ""
-                return f"SDH: {s.get('is_sdh')} {full_tag}"
-            return ""
+    print(f"Found {len(media_files)} media files:")
+    for i, mf in enumerate(media_files):
+        print(f"[{i+1}] {mf.standardized_id} ({mf.media_type}) - {os.path.basename(mf.path)}")
 
-        # Build the selection containers
-        video_container: textual.containers.Container = build_stream_list("Video", video_streams, 'video')
-        audio_container: textual.containers.Container = build_stream_list("Audio", audio_streams, 'audio')
-        subtitle_container: textual.containers.Container = build_stream_list("Subtitle", subtitle_streams, 'subtitle')
-
-        # Main details container
-        details_container = textual.containers.Container(
-            textual.widgets.Static(f"--- Metadata for: {os.path.basename(media_file.path)} ---"),
-            video_container,
-            audio_container,
-            subtitle_container
-        )
+    print("\n--- Conversion Pipeline ---")
+    for i, mf in enumerate(media_files):
+        print(f"\nFile {i+1}: {os.path.basename(mf.path)}")
         
-        return details_container
+        # Beautify metadata output
+        streams = mf.metadata.get('streams', [])
+        print(f"{'Type':<10} | {'Codec':<15} | {'Lang':<5} | {'Details'}")
+        print("-" * 60)
+        for s in streams:
+            details = ""
+            if s['codec_type'] == 'video':
+                details = f"{s.get('width')}x{s.get('height')} @ {s.get('bit_rate')}"
+            elif s['codec_type'] == 'audio':
+                details = f"{s.get('channels')} ch"
+            elif s['codec_type'] == 'subtitle':
+                details = "Subtitle"
+            
+            print(f"{s['codec_type']:<10} | {s['codec_name']:<15} | {s['language']:<5} | {details}")
+        
+        # --- Intelligent Selection Logic ---
+        # Define preferred languages (can be expanded or moved to Config)
+        preferred_langs = ['eng', 'en', 'fre', 'fra']
+        
+        # Determine the "best" language available in the media
+        available_langs = {s['language'] for s in streams}
+        best_lang = next((lang for lang in preferred_langs if lang in available_langs), None)
+        if not best_lang:
+            # If no preferred lang found, just pick the first available language
+            best_lang = next(iter(available_langs)) if available_langs else None
+
+        # Define track lists
+        video_tracks = [s for s in streams if s['codec_type'] == 'video']
+        audio_tracks = [s for s in streams if s['codec_type'] == 'audio']
+        subtitle_tracks = [s for s in streams if s['codec_type'] == 'subtitle']
+
+        # 1. Video Selection: First video track
+        selected_v = [video_tracks[0]['index']] if video_tracks else []
+        
+        # 2. Audio Selection:
+        # Priority: Forced -> Preferred Language -> First Available
+        selected_a = []
+        if audio_tracks:
+            forced_audio = [s for s in audio_tracks if s['is_forced']]
+            if forced_audio:
+                selected_a = [forced_audio[0]['index']]
+            elif best_lang:
+                lang_audio = [s for s in audio_tracks if s['language'] == best_lang]
+                selected_a = [lang_audio[0]['index']] if lang_audio else [audio_tracks[0]['index']]
+            else:
+                selected_a = [audio_tracks[0]['index']]
+            
+        # 3. Subtitle Selection:
+        # Priority: (Full or SDH in Preferred Lang) -> (Any in Preferred Lang) -> First Available
+        selected_s = []
+        if subtitle_tracks:
+            full_subs = [s for s in subtitle_tracks if s['is_full'] or s['is_sdh']]
+            if full_subs:
+                # Try to find a full/sdh sub in the preferred language
+                lang_full_sdh = [s for s in full_subs if s['language'] == best_lang]
+                selected_s = [lang_full_sdh[0]['index']] if lang_full_sdh else [full_subs[0]['index']]
+            elif best_lang:
+                # Try to find any sub in the preferred language
+                lang_subs = [s for s in subtitle_tracks if s['language'] == best_lang]
+                selected_s = [lang_subs[0]['index']] if lang_subs else [subtitle_tracks[0]['index']]
+            else:
+                selected_s = [subtitle_tracks[0]['index']]
+
+        # Construct the mkvmerge command
+        command = [config.get_executable("mkvmerge"), "-o", f"{mf.path}.mkv"]
+        if selected_v:
+            command.extend(["-v", ",".join(map(str, selected_v))])
+        if selected_a:
+            command.extend(["-a", ",".join(map(str, selected_a))])
+        if selected_s:
+            command.extend(["-s", ",".join(map(str, selected_s))])
+        command.append(mf.path)
+
+        print(f"\nProposed command: {' '.join(command)}")
+        print(f"Selected Tracks: Video: {selected_v}, Audio: {selected_a}, Subs: {selected_s}")
+        
+        confirm = input("Proceed with conversion? (y/n): ").lower()
+        if confirm == 'y':
+            print(f"Executing: {' '.join(command)}")
+            try:
+                # In a real scenario, we might need to run ffmpeg for transcoding before mkvmerge.
+                # For now, we execute the mkvmerge command as requested.
+                subprocess.run(command, check=True)
+                print(f"Successfully converted to {mf.path}.mkv")
+            except subprocess.CalledProcessError as e:
+                print(f"Error during conversion: {e}")
+        else:
+            print("Skipping.")
 
 # --- Utility Functions (To be implemented) ---
 def parse_filename(filename: str) -> tuple[str, str]:
@@ -473,5 +393,4 @@ def run_conversion_pipeline(media_file: MediaFile, selected_streams: dict[str, t
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
-    app = VideoConverterApp()
-    app.run()
+    main()
