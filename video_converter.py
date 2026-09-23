@@ -7,28 +7,63 @@ import typing
 
 # TUI Library
 import textual.app
-import textual.widgets
 import textual.containers
+import textual.widgets
+
+LINUX_EXECUTABLE_PATHS = {
+    "ffprobe": "/mnt/g/TOOLS/ffmpeg/bin/ffprobe.exe",
+    "ffmpeg": "/mnt/g/TOOLS/ffmpeg/bin/ffmpeg.exe",
+    "eac3to": "/mnt/g/TOOLS/eac3to/eac3to.exe",
+    "seconv": "/mnt/g/TOOLS/SubtitleEdit/seconv.exe",
+    "mkvmerge": "/mnt/g/TOOLS/MKVToolNix/mkvmerge.exe"
+}
+
+WINDOWS_EXECUTABLE_PATHS = {
+    "ffprobe": "G:\\TOOLS\\ffmpeg\\bin\\ffprobe.exe",
+    "ffmpeg": "G:\\TOOLS\\ffmpeg\\bin\\ffmpeg.exe",
+    "eac3to": "G:\\TOOLS\\eac3to\\eac3to.exe",
+    "seconv": "G:\\TOOLS\\SubtitleEdit\\seconv.exe",
+    "mkvmerge": "G:\\TOOLS\\MKVToolNix\\mkvmerge.exe"
+}
+
+LINUX_MEDIA_SCAN_PATHS = [
+    "/mnt/d/todo",
+]
+
+WINDOWS_MEDIA_SCAN_PATHS = [
+    "D:\\todo",
+]
 
 # --- Configuration and Platform Detection ---
 class Config:
     """Holds all configuration, including platform-specific paths."""
-    def __init__(self) -> None:
+    def __init__(self, scan_directory = None) -> None:
         self.platform: str = platform.system()
+        # Always use the provided scan_directory or default to the current working directory (os.getcwd())
         self.executables = {}
+        self.scan_paths = []
         self._load_paths()
+        self._load_scan_paths()
 
     def _load_paths(self) -> None:
         # Placeholder for loading paths based on platform and user input
         # These paths must be dynamically set based on user input later.
-        self.executables['ffprobe'] = "ffprobe"
-        self.executables['ffmpeg'] = "ffmpeg"
-        self.executables['eac3to'] = "eac3to"
-        self.executables['seconv'] = "seconv"
-        self.executables['mkvmerge'] = "mkvmerge"
+        if self.platform == "Linux":
+            self.executables = LINUX_EXECUTABLE_PATHS
+        elif self.platform == "Windows":
+            self.executables = WINDOWS_EXECUTABLE_PATHS
 
     def get_executable(self, name: str) -> str:
         return self.executables.get(name, name)
+
+    def _load_scan_paths(self) -> None:
+        if self.platform == "Linux":
+            self.scan_paths = LINUX_MEDIA_SCAN_PATHS
+        elif self.platform == "Windows":
+            self.scan_paths = WINDOWS_MEDIA_SCAN_PATHS
+        else:
+            self.scan_paths = []
+
 
 # --- Core Logic Classes ---
 class MediaFile:
@@ -62,18 +97,23 @@ class VideoConverterApp(textual.app.App):
     }
     """
 
-    BINDINGS: list[textual.app.Binding | tuple[str, str] | tuple[str, str, str]] = []
+    # BINDINGS: list[textual.app.Binding | tuple[str, str] | tuple[str, str, str]] = [
+    BINDINGS: list[textual.app.Binding | tuple[str, str] | tuple[str, str, str]] = [
+        ("q", "quit", "Quit"),
+        ("enter", "update_details", "Update Details"),
+    ]
 
     def __init__(self) -> None:
         super().__init__()
         self.BINDINGS: list[textual.app.Binding | tuple[str, str] | tuple[str, str, str]] = [
             ("q", "quit", "Quit"),
+            ("enter", "update_details", "Update Details"),
         ]
 
     def compose(self) -> textual.app.ComposeResult:
         yield textual.widgets.Header()
         yield textual.containers.Container(
-            textual.widgets.Static(id="media_list", markup=True),
+            textual.widgets.ListView(id="media_list"),
             textual.widgets.Static(id="stream_details", markup=True)
         )
         yield textual.widgets.Footer()
@@ -84,13 +124,63 @@ class VideoConverterApp(textual.app.App):
         self.selected_media_index: int = 0
         self.scan_media_files()
         self.log(f"Application mounted. Found {len(self.media_files)} media files.")
-        self.update_media_list()
+        self.media_list_widget: textual.widgets.ListView = self.query_one("#media_list", textual.widgets.ListView)
+        
+        if self.media_files:
+            self.media_list_widget.clear()
+            for media_file in self.media_files:
+                item = textual.widgets.ListItem(textual.widgets.Static(media_file.standardized_id))
+                item.data = media_file
+                self.media_list_widget.append(item)
+        else:
+            self.media_list_widget.clear()
+            self.media_list_widget.append(textual.widgets.ListItem(textual.widgets.Static("No media files found in the current directory.")))
+
         self.update_stream_details(None) # Initialize details panel as empty
+
+    # def action_update_details(self) -> None:
+    #     """Action to update stream details on Enter press."""
+    #     media_list_widget: textual.widgets.ListView = self.query_one("#media_list", textual.widgets.ListView)
+    #     self.update_stream_details(media_list_widget.index)
+    #     self.media_list_widget.clear()
+    #     self.media_list_widget.append(textual.widgets.ListItem(textual.widgets.Static("No media files found in the current directory.")))
+
+    #     self.update_stream_details(None) # Initialize details panel as empty
+
+    def action_update_details(self) -> None:
+        """Action to update stream details on Enter press."""
+        media_list_widget: textual.widgets.ListView = self.query_one("#media_list", textual.widgets.ListView)
+        self.update_stream_details(media_list_widget.index)
 
     def update_media_list(self) -> None:
         """Updates the media list Static widget with the current list of files."""
         media_list_widget: textual.widgets.Static = self.query_one("#media_list", textual.widgets.Static)
         media_list_widget.update(self.get_media_list_markup())
+
+    def scan_media_files(self) -> None:
+        """Scans the current directory for media files and extracts metadata."""
+        scan_dir: str = self.config.scan_paths[0] if self.config.scan_paths else os.getcwd()
+
+        print(f"Scanning directory: {scan_dir}")
+
+        if not os.path.isdir(scan_dir):
+            self.log(f"Error: Scan directory not found at {scan_dir}")
+            return
+
+        for filename in os.listdir(scan_dir):
+            if filename.endswith(('.mkv', '.mp4', '.avi')):
+                file_path: str = os.path.join(scan_dir, filename)
+                
+                # 1. Parse filename
+                standardized_id, media_type = parse_filename(filename)
+                
+                # 2. Extract stream info
+                metadata: dict[str, typing.Any] = extract_stream_info(file_path)
+                
+                if metadata:
+                    # 3. Create MediaFile object
+                    media_file = MediaFile(file_path, standardized_id, media_type, metadata)
+                    self.media_files.append(media_file)
 
     def update_stream_details(self, selected_index: int) -> None:
         """Updates the stream details Static widget based on the selected file index."""
@@ -105,28 +195,14 @@ class VideoConverterApp(textual.app.App):
         stream_details_widget.update(self.display_stream_details(media_file))
 
     def on_media_list_selected(self, event: textual.widgets.ListView.Selected) -> None:
-        """Handles selection event from the media list."""
-        # The event object in Textual ListView.Selected contains the selected item's value
-        selected_index: int = self.media_files.index(event.value)
-        self.update_stream_details(selected_index)
-
-    def scan_media_files(self) -> None:
-        """Scans the current directory for media files and extracts metadata."""
-        current_dir: str = os.getcwd()
-        for filename in os.listdir(current_dir):
-            if filename.endswith(('.mkv', '.mp4', '.avi')):
-                file_path: str = os.path.join(current_dir, filename)
-                
-                # 1. Parse filename
-                standardized_id, media_type = parse_filename(filename)
-                
-                # 2. Extract stream info
-                metadata: dict[str, typing.Any] = extract_stream_info(file_path)
-                
-                if metadata:
-                    # 3. Create MediaFile object
-                    media_file = MediaFile(file_path, standardized_id, media_type, metadata)
-                    self.media_files.append(media_file)
+        """Handles selection event from the media list and updates details automatically."""
+        self.log(f"ListView selected: {event.value}")
+        self.log(f"ListView selected: {event.value}")
+        selected_item = event.value
+        if hasattr(selected_item, 'data') and isinstance(selected_item.data, MediaFile):
+            media_file = selected_item.data
+        else:
+            self.log("Warning: Selected item does not contain valid media data.")
 
     def get_media_list_markup(self) -> str:
         """Generates the markup for the media file list."""

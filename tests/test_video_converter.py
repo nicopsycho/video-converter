@@ -1,5 +1,4 @@
 import sys
-import os
 
 # Add the project root to sys.path to allow module imports
 sys.path.insert(0, r"g:\GIT\video-converter")
