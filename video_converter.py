@@ -497,40 +497,53 @@ def run_conversion_pipeline():
             audio_files_to_convert = [f for f in extracted_files if f.endswith('.flac')]
             for flac_file in audio_files_to_convert:
                 aac_file = flac_file.replace('.flac', '.aac.m4a')
-            
-            # Determine eac3to arguments based on media type and channel count
-            # We need to check the channel count of the original audio stream
-            # Since we don't have the stream object easily here, we can check the file or use a default
-            # For now, we'll check if it's a series or movie and handle the channel count
-            
-            eac3to_cmd = [config.get_executable("eac3to"), flac_file, aac_file, "-quality=0.25"]
-            
-            if mf.media_type == "Series":
-                eac3to_cmd.extend(["-downDpl"])
-            else:
-                # Movie logic: check for more than 6 channels
-                # We can use ffprobe to check the channel count of the flac file
-                probe_cmd = [
-                    config.get_executable("ffprobe"),
-                    "-v", "error",
-                    "-select_streams", "a",
-                    "-show_entries", "stream=channels",
-                    "-of", "json",
-                    flac_file
-                ]
+                
+                # Determine eac3to arguments based on media type and channel count
+                # We need to check the channel count of the original audio stream
+                # Since we don't have the stream object easily here, we can check the file or use a default
+                # For now, we'll check if it's a series or movie and handle the channel count
+                
+                eac3to_cmd = [config.get_executable("eac3to"), flac_file, aac_file, "-quality=0.25"]
+                
+                if mf.media_type == "Series":
+                    eac3to_cmd.extend(["-downDpl"])
+                else:
+                    # Movie logic: check for more than 6 channels
+                    # We can use ffprobe to check the channel count of the flac file
+                    probe_cmd = [
+                        config.get_executable("ffprobe"),
+                        "-v", "error",
+                        "-select_streams", "a",
+                        "-show_entries", "stream=channels",
+                        "-of", "json",
+                        flac_file
+                    ]
+                    try:
+                        probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+                        data = json.loads(probe_res.stdout)
+                        channels = data.get('streams', [{}])[0].get('channels', 0)
+                        if channels > 6:
+                            eac3to_cmd.extend(["-down6"])
+                    except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError, KeyError):
+                        pass # Fallback to default if probe fails
+                
+                print(f"Converting {os.path.basename(flac_file)} to AAC...")
                 try:
-                    probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
-                    data = json.loads(probe_res.stdout)
-                    channels = data.get('streams', [{}])[0].get('channels', 0)
-                    if channels > 6:
-                        eac3to_cmd.extend(["-down6"])
-                except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError, KeyError):
-                    pass # Fallback to default if probe fails
-            
-            print(f"Converting {os.path.basename(flac_file)} to AAC...")
-            subprocess.run(eac3to_cmd, check=True)
-            # Update the list of files to be muxed to use the new AAC file
-            extracted_files = [aac_file if f == flac_file else f for f in extracted_files]
+                    subprocess.run(eac3to_cmd, check=True, capture_output=True, text=True)
+                    print(f"Successfully converted {os.path.basename(flac_file)}")
+                    extracted_files.append(aac_file)
+                except subprocess.CalledProcessError as e:
+                    print(f"Error converting {os.path.basename(flac_file)}: {e.stderr}")
+                    print(f"STDOUT: {e.stdout}")
+                    raise
+        else:
+            # Audio conversion was skipped, but we still need to ensure that the extracted_files list contains the correct audio files for muxing.
+            # We'll filter out the .flac files and add new entries as .aac.m4a files.
+            audio_files_to_convert = [f for f in extracted_files if f.endswith('.flac')]
+            for flac_file in audio_files_to_convert:
+                aac_file = flac_file.replace('.flac', '.aac.m4a')
+                extracted_files.append(aac_file)
+
         
         # --- Step 3: Video Encoding ---
         print("Step 3: Video Encoding...")
@@ -643,25 +656,30 @@ def run_conversion_pipeline():
 
         # Add the extracted files to the command with their specific parameters
         # We iterate through the extracted_files which contains the paths to the audio and subtitle files
-        
+        french_audio_found = False
+
         # 1. French Audio
         for file_path in extracted_files:
-            if "frq" in file_path:
-                command.extend(["--no-global-tags:", "--no-chapters", 
-                                "--language", "0:fr", 
-                                "--track-name", "0:Quebecquois", 
-                                "--compression", "0:none", f"{file_path}"])
-            elif "fr" in file_path and file_path.endswith('.aac.m4a'):
-                command.extend(["--no-global-tags:", "--no-chapters", 
-                                "--language", "0:fr", 
-                                "--compression", "0:none", f"{file_path}"])
+            # Check for French codes (fr, fra, frq) and the correct extension
+            if any(code in file_path for code in ["fr", "fra", "frq"]) and file_path.endswith('.aac.m4a'):
+                if "frq" in file_path:
+                    command.extend(["--no-global-tags", "--no-chapters", 
+                                    "--language", "0:fr", 
+                                    "--track-name", "0:Quebecquois", 
+                                    "--compression", "0:none", f"{file_path}"])
+                else:
+                    command.extend(["--no-global-tags", "--no-chapters", 
+                                    "--language", "0:fr", 
+                                    "--compression", "0:none", f"{file_path}"])
+                french_audio_found = True
 
         # 2. Original/Other Audio
         for file_path in extracted_files:
-            if file_path.endswith('.aac.m4a') and "fr" not in file_path and "frq" not in file_path:
+            # Catch all other .aac.m4a files that weren't handled by the French logic
+            if file_path.endswith('.aac.m4a') and not any(code in file_path for code in ["fr", "fra", "frq"]):
                 lang_match = re.search(r'([a-z]{3})\.aac\.m4a$', file_path)
                 lang = lang_match.group(1) if lang_match else "en"
-                command.extend(["--no-global-tags:", "--no-chapters", 
+                command.extend(["--no-global-tags", "--no-chapters", 
                                 "--language", f"0:{lang}", 
                                 "--compression", "0:none", f"{file_path}"])
 
@@ -675,6 +693,7 @@ def run_conversion_pipeline():
                                     "--compression", "0:none", f"{file_path}"])
                 elif "fre" in file_path:
                     command.extend(["--language", "0:fr", 
+                                    "--default-track-flag", "0:no" if french_audio_found else "0:yes",
                                     "--track-name", "0:Complet", 
                                     "--compression", "0:none", f"{file_path}"])
                 else:
