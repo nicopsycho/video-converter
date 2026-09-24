@@ -4,6 +4,12 @@ import platform
 import re
 import subprocess
 import typing
+from typing import Optional
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 LINUX_EXECUTABLE_PATHS = {
     "ffprobe": "/mnt/g/TOOLS/ffmpeg/bin/ffprobe.exe",
@@ -39,6 +45,8 @@ class Config:
         self.scan_paths = []
         self._load_paths()
         self._load_scan_paths()
+        self._load_api_keys()
+        self._load_api_keys()
 
     def _load_paths(self) -> None:
         # Placeholder for loading paths based on platform and user input
@@ -59,6 +67,12 @@ class Config:
         else:
             self.scan_paths = []
 
+    def _load_api_keys(self) -> None:
+        # Load from environment variables (which includes .env file via load_dotenv)
+        self.tmdb_api_key = os.environ.get("TMDB_API_KEY")
+        if not self.tmdb_api_key:
+            print("Warning: TMDB_API_KEY not found in environment or .env file.")
+
 
 # --- Core Logic Classes ---
 class MediaFile:
@@ -68,9 +82,38 @@ class MediaFile:
         self.standardized_id: str = standardized_id
         self.media_type: str = media_type # 'Series' or 'Movie'
         self.metadata: dict[str, typing.Any] = metadata # Contains all ffprobe data
+        self.original_language: Optional[str] = None
         self.selected_audio_tracks: list[str] = []
         self.selected_subtitle_tracks: list[str] = []
         self.selected_video_tracks: list[str] = []
+
+# --- Helper Functions ---
+def get_original_language(config: Config, standardized_id: str, media_type: str, metadata: dict[str, typing.Any]) -> Optional[str]:
+    """
+    Attempts to fetch the original language from TMDB.
+    """
+    if not config.tmdb_api_key:
+        print("Warning: No TMDB API key configured. Skipping language lookup.")
+        return None
+
+    # Fallback logic: if there are 2 audio languages, assume the non-French one is the original.
+    audio_streams = [s for s in metadata.get('streams', []) if s.get('codec_type') == 'audio']
+    if len(audio_streams) == 2:
+        languages = [s.get('language') for s in audio_streams if s.get('language')]
+        # Filter out 'fre' and 'fra' (French) and see what's left
+        non_french = [lang for lang in languages if lang and lang.lower() not in ['fre', 'fra']]
+        if len(non_french) == 1:
+            return non_french[0]
+
+    print(f"Attempting to lookup original language for {media_type}: {standardized_id}...")
+    
+    # Placeholder for actual API calls
+    # Example: 
+    # if media_type == 'Movie':
+    #     resp = requests.get(f"https://api.tmdb.org/3/movie/{standardized_id}", params={"api_key": config.tmdb_api_key})
+    #     ...
+    
+    return "en" # Defaulting to English for now as a placeholder
 
 # --- Main Application ---
 def main():
@@ -99,6 +142,8 @@ def main():
             if metadata:
                 # 3. Create MediaFile object
                 media_file = MediaFile(file_path, standardized_id, media_type, metadata)
+                # Fetch original language
+                media_file.original_language = get_original_language(config, media_file.standardized_id, media_file.media_type, media_file.metadata)
                 media_files.append(media_file)
 
     if not media_files:
@@ -108,6 +153,8 @@ def main():
     print(f"Found {len(media_files)} media files:")
     for i, mf in enumerate(media_files):
         print(f"[{i+1}] {mf.standardized_id} ({mf.media_type}) - {os.path.basename(mf.path)}")
+        if mf.original_language:
+            print(f"    Original Language: {mf.original_language}")
 
     print("\n--- Conversion Pipeline ---")
     for i, mf in enumerate(media_files):
@@ -124,7 +171,14 @@ def main():
             elif s['codec_type'] == 'audio':
                 details = f"{s.get('channels')} ch"
             elif s['codec_type'] == 'subtitle':
-                details = "Subtitle"
+                if s.get('is_forced'):
+                    details = "Forced"
+                elif s.get('is_sdh'):
+                    details = "SDH"
+                elif s.get('is_full'):
+                    details = "Full"
+                else:
+                    details = str(s.get('number_frames', 'N/A'))
             
             print(f"{s['codec_type']:<10} | {s['codec_name']:<15} | {s['language']:<5} | {details}")
         
@@ -133,74 +187,233 @@ def main():
         preferred_langs = ['eng', 'en', 'fre', 'fra']
         
         # Determine the "best" language available in the media
-        available_langs = {s['language'] for s in streams}
+        available_langs = {s['language'] for s in streams if s.get('language')}
+        
+        # Normalize available languages to check against preferred_langs
+        # (e.g., if 'fre' is in available_langs, it matches 'fre' in preferred_langs)
         best_lang = next((lang for lang in preferred_langs if lang in available_langs), None)
+        
         if not best_lang:
             # If no preferred lang found, just pick the first available language
             best_lang = next(iter(available_langs)) if available_langs else None
 
         # Define track lists
-        video_tracks = [s for s in streams if s['codec_type'] == 'video']
         audio_tracks = [s for s in streams if s['codec_type'] == 'audio']
         subtitle_tracks = [s for s in streams if s['codec_type'] == 'subtitle']
 
-        # 1. Video Selection: First video track
-        selected_v = [video_tracks[0]['index']] if video_tracks else []
-        
-        # 2. Audio Selection:
-        # Priority: Forced -> Preferred Language -> First Available
+        # 1. Audio Selection:
+        # Priority: Forced -> French (fre/frq) + Original Language -> First Available
         selected_a = []
         if audio_tracks:
-            forced_audio = [s for s in audio_tracks if s['is_forced']]
+            forced_audio = [s for s in audio_tracks if s.get('is_forced')]
             if forced_audio:
                 selected_a = [forced_audio[0]['index']]
-            elif best_lang:
-                lang_audio = [s for s in audio_tracks if s['language'] == best_lang]
-                selected_a = [lang_audio[0]['index']] if lang_audio else [audio_tracks[0]['index']]
             else:
-                selected_a = [audio_tracks[0]['index']]
-            
-        # 3. Subtitle Selection:
-        # Priority: (Full or SDH in Preferred Lang) -> (Any in Preferred Lang) -> First Available
+                # Identify French tracks
+                french_tracks = [s for s in audio_tracks if s.get('language') == 'fre']
+                french_canadian = [s for s in audio_tracks if s.get('language') == 'frq']
+                
+                # Identify Original Language tracks
+                orig_lang = mf.original_language if mf.original_language else None
+                orig_lang_tracks = [s for s in audio_tracks if s.get('language') == orig_lang] if orig_lang else []
+
+                # Logic:
+                # 1. If original language is French, only select French.
+                # 2. Otherwise, select French (prefer fre over frq) AND Original Language.
+                # 3. If no French, only use Original Language.
+                # 4. Fallback to first available.
+
+                if orig_lang == 'fre':
+                    # Only French
+                    if french_tracks:
+                        selected_a = [french_tracks[0]['index']]
+                    elif french_canadian:
+                        selected_a = [french_canadian[0]['index']]
+                    elif orig_lang_tracks:
+                        selected_a = [orig_lang_tracks[0]['index']]
+                    else:
+                        selected_a = [audio_tracks[0]['index']]
+                else:
+                    # French + Original
+                    selected_a = []
+                    # Add French if available
+                    if french_tracks:
+                        selected_a.append(french_tracks[0]['index'])
+                    elif french_canadian:
+                        selected_a.append(french_canadian[0]['index'])
+                    
+                    # Add Original Language if available and not already added (if it was French)
+                    if orig_lang_tracks and orig_lang_tracks[0]['index'] not in selected_a:
+                        selected_a.append(orig_lang_tracks[0]['index'])
+
+                    # If neither French nor Original is available, fallback to first available
+                    if not selected_a:
+                        selected_a = [audio_tracks[0]['index']]
+        
+        # 2. Subtitle Selection:
+        # Priority: Forced French -> Full French -> French SDH
         selected_s = []
         if subtitle_tracks:
-            full_subs = [s for s in subtitle_tracks if s['is_full'] or s['is_sdh']]
-            if full_subs:
-                # Try to find a full/sdh sub in the preferred language
-                lang_full_sdh = [s for s in full_subs if s['language'] == best_lang]
-                selected_s = [lang_full_sdh[0]['index']] if lang_full_sdh else [full_subs[0]['index']]
-            elif best_lang:
-                # Try to find any sub in the preferred language
-                lang_subs = [s for s in subtitle_tracks if s['language'] == best_lang]
-                selected_s = [lang_subs[0]['index']] if lang_subs else [subtitle_tracks[0]['index']]
-            else:
-                selected_s = [subtitle_tracks[0]['index']]
+            # Identify French tracks
+            french_subs = [s for s in subtitle_tracks if s.get('language') == 'fre']
+            
+            # 1. Forced French
+            forced_french = [s for s in french_subs if s.get('is_forced')]
+            if forced_french:
+                selected_s.append(forced_french[0]['index'])
+            
+            # 2. Full French (if not already added as forced)
+            full_french = [s for s in french_subs if s.get('is_full') and s['index'] not in selected_s]
+            if full_french:
+                selected_s.append(full_french[0]['index'])
 
-        # Construct the mkvmerge command
-        command = [config.get_executable("mkvmerge"), "-o", f"{mf.path}.mkv"]
-        if selected_v:
-            command.extend(["-v", ",".join(map(str, selected_v))])
-        if selected_a:
-            command.extend(["-a", ",".join(map(str, selected_a))])
-        if selected_s:
-            command.extend(["-s", ",".join(map(str, selected_s))])
-        command.append(mf.path)
+            # 3. French SDH (if full not available)
+            elif not any(s.get('is_full') for s in french_subs):
+                sdh_french = [s for s in french_subs if s.get('is_sdh') and s['index'] not in selected_s]
+                if sdh_french:
+                    selected_s.append(sdh_french[0]['index'])
 
-        print(f"\nProposed command: {' '.join(command)}")
-        print(f"Selected Tracks: Video: {selected_v}, Audio: {selected_a}, Subs: {selected_s}")
+            # Fallback: If no French subs were found, try to find any subs in the preferred language
+            if not selected_s and best_lang:
+                lang_subs = [s for s in subtitle_tracks if s.get('language') == best_lang]
+                if lang_subs:
+                    # Prefer subrip over sup
+                    subrip_subs = [s for s in lang_subs if s.get('codec_name') in ['subrip', 'srt']]
+                    if subrip_subs:
+                        selected_s.append(subrip_subs[0]['index'])
+                    else:
+                        selected_s.append(lang_subs[0]['index'])
+            
+            # Final Fallback: If no French or preferred language subs, prefer English subrip, then English sup, then first available
+            if not selected_s:
+                eng_subs = [s for s in subtitle_tracks if s.get('language') == 'eng']
+                if eng_subs:
+                    eng_subrip = [s for s in eng_subs if s.get('codec_name') in ['subrip', 'srt']]
+                    if eng_subrip:
+                        selected_s.append(eng_subrip[0]['index'])
+                    else:
+                        selected_s.append(eng_subs[0]['index'])
+                elif subtitle_tracks:
+                    selected_s.append(subtitle_tracks[0]['index'])
+
+            
+            # Final Fallback: First available subtitle
+            if not selected_s and subtitle_tracks:
+                selected_s.append(subtitle_tracks[0]['index'])
+
+
+        # --- Step 1: Extract Streams ---
         
-        confirm = input("Proceed with conversion? (y/n): ").lower()
-        if confirm == 'y':
-            print(f"Executing: {' '.join(command)}")
-            try:
-                # In a real scenario, we might need to run ffmpeg for transcoding before mkvmerge.
-                # For now, we execute the mkvmerge command as requested.
-                subprocess.run(command, check=True)
-                print(f"Successfully converted to {mf.path}.mkv")
-            except subprocess.CalledProcessError as e:
-                print(f"Error during conversion: {e}")
+        # We use ffmpeg to extract individual streams into separate files
+        # Naming convention:
+        # - Forced: {lang}f.{ext}
+        # - SDH: {lang}h.{ext}
+        # - Full: {lang}.{ext}
+        # - Others: {lang}.{ext}
+        
+        # Get the directory of the media file
+        output_dir = os.path.dirname(mf.path)
+        extract_cmd = [config.get_executable("ffmpeg"), "-i", mf.path]
+
+        # Audio tracks
+        for a_idx in selected_a:
+            a_stream = streams[a_idx]
+            lang = a_stream.get('language', 'eng')
+            ext = "flac"  # Example: Convert AAC to FLAC for lossless extraction
+            out_name = f"{lang}.{ext}"
+            # Join the output name with the directory of the media file
+            extract_cmd.extend(["-map", f"0:{a_idx}", os.path.join(output_dir, out_name)])
+
+        # Subtitle tracks
+        subtitle_counts = {}
+        for s_idx in selected_s:
+            s_stream = streams[s_idx]
+            lang = s_stream.get('language', 'und')
+            
+            if s_stream.get('is_forced'):
+                suffix = "f"
+            elif s_stream.get('is_sdh'):
+                suffix = "h"
+            else:
+                suffix = ""
+            
+            base_name = f"{lang}{suffix}"
+
+            if s_stream.get('codec_name') in ['subrip', 'srt']:
+                ext = ".srt"
+            elif s_stream.get('codec_name') in ['ass', 'ssa']:
+                ext = ".ass"
+            elif s_stream.get('codec_name') in ['mov_text', 'webvtt']:
+                ext = ".vtt"
+            elif s_stream.get('codec_name') in ['hdmv_pgs_subtitle', 'dvd_subtitle']:
+                ext = ".sup"
+            else:
+                ext = ".mkv"  # Default to MKV container for unknown subtitle formats
+            
+            # Handle duplicate names by incrementing
+            count = subtitle_counts.get(base_name, 0)
+            if count > 0:
+                base_name = f"{base_name}{count}"
+            subtitle_counts[base_name] = count + 1
+            
+            out_name = f"{base_name}{ext}"
+            # Join the output name with the directory of the media file
+            extract_cmd.extend(["-map", f"0:{s_idx}", os.path.join(output_dir, out_name)])
+
+        print(f"\nStep 1: Extracting selected streams from {os.path.basename(mf.path)}...")
+        print(f"Extraction command: {extract_cmd}")
+        confirm_step1 = input("Proceed to Step 1 (Extraction)? (y/n): ").lower()
+        if confirm_step1 == 'y':
+            subprocess.run(extract_cmd, check=True)
+
+        # Confirmation between steps
+        confirm_step2 = input("Proceed to Step 2 (Final Muxing)? (y/n): ").lower()
+        if confirm_step2 == 'y':
+            # --- Step 2: Final Muxing ---
+            print(f"\nStep 2: Final Muxing...")
+            # Use the original path as the output for mkvmerge
+            mux_cmd = [config.get_executable("mkvmerge"), "-o", f"{mf.path}.mkv"]
+            
+            # Add the extracted files to the muxing command
+            # Note: mkvmerge -o output.mkv file1 file2 ...
+            # We need to be careful about the order. Usually, we want the original file as the base if possible, 
+            # but since we are extracting, we just mux the extracted files.
+            # However, the user's previous logic was to mux the original file with selected tracks.
+            # Since we extracted them, we should mux the extracted files into the final mkv.
+            
+            # To maintain the original file's structure as much as possible, 
+            # we'll use the extracted video as the primary source.
+            
+            # Let's find the extracted video file
+            video_extracted = next((f for f in extracted_files if "_video.mkv" in f), None)
+            if video_extracted:
+                mux_cmd.append(video_extracted)
+            
+            # Add all other extracted files
+            for f in extracted_files:
+                if f != video_extracted:
+                    mux_cmd.append(f)
+            
+            subprocess.run(mux_cmd, check=True)
+            
+            # Cleanup
+            for f in extracted_files:
+                if os.path.exists(f):
+                    os.remove(f)
+            print(f"Successfully converted to {mf.path}.mkv")
         else:
-            print("Skipping.")
+            print("Skipping Step 2.")
+            # Cleanup extracted files if skipped
+            for f in extracted_files:
+                if os.path.exists(f):
+                    #os.remove(f)
+                    pass
+            break
+            
+
+
+
+
 
 # --- Utility Functions (To be implemented) ---
 def parse_filename(filename: str) -> tuple[str, str]:
@@ -250,7 +463,6 @@ def extract_stream_info(file_path: str) -> dict[str, typing.Any]:
         command: list[str] = [
             "ffprobe",
             "-v", "error",
-            "-select_streams", "a:0", # Start by selecting the first audio stream for initial checks
             "-show_streams",
             "-of", "json",
             file_path
@@ -261,7 +473,7 @@ def extract_stream_info(file_path: str) -> dict[str, typing.Any]:
         
         # Parse JSON output
         data = json.loads(result.stdout)
-        
+
         all_streams = []
         for stream in data.get('streams', []):
             stream_info: dict[str, typing.Any] = {
@@ -274,9 +486,21 @@ def extract_stream_info(file_path: str) -> dict[str, typing.Any]:
                 'width': stream.get('width'),
                 'height': stream.get('height'),
                 'bit_rate': stream.get('bit_rate'),
-                'is_forced': stream.get('tags', {}).get('forced', 'false').lower() == 'true',
-                'is_full': stream.get('tags', {}).get('full', 'false').lower() == 'true',
-                'is_sdh': stream.get('tags', {}).get('sdh', 'false').lower() == 'true',
+                'number_frames': stream.get('tags', {}).get('NUMBER_OF_FRAMES'),
+                'is_forced': (stream.get('tags', {}).get('forced', '').lower() == 'true' or \
+                                   stream.get('tags', {}).get('title', '').lower() == 'forced' or \
+                                   stream.get('disposition', {}).get('forced') == 1),
+                'is_full': not (stream.get('tags', {}).get('forced', '').lower() == 'true' or \
+                                      stream.get('tags', {}).get('title', '').lower() == 'forced' or \
+                                      stream.get('disposition', {}).get('forced') == 1 or \
+                                      stream.get('tags', {}).get('sdh', '').lower() == 'true' or \
+                                      stream.get('tags', {}).get('title', '').lower() == 'sdh' or \
+                                      stream.get('disposition', {}).get('hearing_impaired') == 1 or \
+                                      stream.get('tags', {}).get('title', '').lower() == 'commentary' or \
+                                      stream.get('disposition', {}).get('comment') == 1),
+                'is_sdh': (stream.get('tags', {}).get('sdh', '').lower() == 'true' or \
+                                  'sdh' in stream.get('tags', {}).get('title', '').lower() or \
+                                  stream.get('disposition', {}).get('hearing_impaired') == 1),
                 'channels': stream.get('channels', 0)
             }
             all_streams.append(stream_info)
