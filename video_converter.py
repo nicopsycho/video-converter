@@ -314,15 +314,25 @@ def main():
         # Get the directory of the media file
         output_dir = os.path.dirname(mf.path)
         extract_cmd = [config.get_executable("ffmpeg"), "-i", mf.path]
+        extracted_files = []
 
         # Audio tracks
         for a_idx in selected_a:
             a_stream = streams[a_idx]
             lang = a_stream.get('language', 'eng')
             ext = "flac"  # Example: Convert AAC to FLAC for lossless extraction
-            out_name = f"{lang}.{ext}"
+            
+            prefix = ""
+            if mf.media_type == "Series":
+                # Extract episode number from standardized_id (e.g., "Show_S01E08" -> "08")
+                ep_match = re.search(r'E(\d{2})', mf.standardized_id)
+                if ep_match:
+                    prefix = f"{ep_match.group(1)}-"
+            
+            out_name = f"{prefix}{lang}.{ext}"
             # Join the output name with the directory of the media file
             extract_cmd.extend(["-map", f"0:{a_idx}", os.path.join(output_dir, out_name)])
+            extracted_files.append(os.path.join(output_dir, out_name))
 
         # Subtitle tracks
         subtitle_counts = {}
@@ -331,13 +341,20 @@ def main():
             lang = s_stream.get('language', 'und')
             
             if s_stream.get('is_forced'):
-                suffix = "f"
+                suffix = "_f"
             elif s_stream.get('is_sdh'):
-                suffix = "h"
+                suffix = "_h"
             else:
                 suffix = ""
             
-            base_name = f"{lang}{suffix}"
+            prefix = ""
+            if mf.media_type == "Series":
+                # Extract episode number from standardized_id (e.g., "Show_S01E08" -> "08")
+                ep_match = re.search(r'E(\d{2})', mf.standardized_id)
+                if ep_match:
+                    prefix = f"{ep_match.group(1)}-"
+            
+            base_name = f"{prefix}{lang}{suffix}"
 
             if s_stream.get('codec_name') in ['subrip', 'srt']:
                 ext = ".srt"
@@ -359,6 +376,7 @@ def main():
             out_name = f"{base_name}{ext}"
             # Join the output name with the directory of the media file
             extract_cmd.extend(["-map", f"0:{s_idx}", os.path.join(output_dir, out_name)])
+            extracted_files.append(os.path.join(output_dir, out_name))
 
         print(f"\nStep 1: Extracting selected streams from {os.path.basename(mf.path)}...")
         print(f"Extraction command: {extract_cmd}")
@@ -366,11 +384,110 @@ def main():
         if confirm_step1 == 'y':
             subprocess.run(extract_cmd, check=True)
 
-        # Confirmation between steps
-        confirm_step2 = input("Proceed to Step 2 (Final Muxing)? (y/n): ").lower()
+        # Convert audio tracks to AAC using eac3to
+        audio_files_to_convert = [f for f in extracted_files if f.endswith('.flac')]
+        for flac_file in audio_files_to_convert:
+            aac_file = flac_file.replace('.flac', '.aac.m4a')
+            
+            # Determine eac3to arguments based on media type and channel count
+            # We need to check the channel count of the original audio stream
+            # Since we don't have the stream object easily here, we can check the file or use a default
+            # For now, we'll check if it's a series or movie and handle the channel count
+            
+            eac3to_cmd = [config.get_executable("eac3to"), flac_file, aac_file, "-quality=0.25"]
+            
+            if mf.media_type == "Series":
+                eac3to_cmd.extend(["-downDpl"])
+            else:
+                # Movie logic: check for more than 6 channels
+                # We can use ffprobe to check the channel count of the flac file
+                probe_cmd = [
+                    config.get_executable("ffprobe"),
+                    "-v", "error",
+                    "-select_streams", "a",
+                    "-show_entries", "stream=channels",
+                    "-of", "json",
+                    flac_file
+                ]
+                try:
+                    probe_res = subprocess.run(probe_cmd, capture_output=True, text=True, check=True)
+                    data = json.loads(probe_res.stdout)
+                    channels = data.get('streams', [{}])[0].get('channels', 0)
+                    if channels > 6:
+                        eac3to_cmd.extend(["-down6"])
+                except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError, KeyError):
+                    pass # Fallback to default if probe fails
+            
+            print(f"Converting {os.path.basename(flac_file)} to AAC...")
+            subprocess.run(eac3to_cmd, check=True)
+            # Update the list of files to be muxed to use the new AAC file
+            extracted_files = [aac_file if f == flac_file else f for f in extracted_files]
+        
+        # --- Step 2: Video Encoding ---
+        print(f"\nStep 2: Video Encoding...")
+
+        # Take the source media file and encode it based on the media type
+        # and the color primaries of the video stream.
+        # For simplicity, we'll assume the first video stream is the one we want to encode.
+        encode_cmd = [config.get_executable("ffmpeg"), 
+                      "-hwaccel", "auto", 
+                      "-loglevel", "error", 
+                      "-stats", "-i", mf.path]
+
+        video_stream = next((s for s in streams if s['codec_type'] == 'video'), None)
+        if video_stream:
+            if mf.media_type == "Series":
+                # Series: Encode to 720p HEVC
+                output_video_path = os.path.join(output_dir, f"{mf.standardized_id}_HEVC-720_Q19-ffmpeg.mkv")
+                encode_cmd.extend([
+                    "-an", "-sn", 
+                    "-vf", "scale=1280:720:flags=spline:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1", 
+                    "-c:v", "libx265", 
+                    "-x265-params", "vbv-maxrate=6000:vbv-bufsize=6000:deblock=-3,-3:open-gop=0", 
+                    "-crf", "19", 
+                    "-preset", "slow",
+                    output_video_path])
+            else:
+                color_primaries = video_stream.get('color_primaries', 'bt709')
+                if color_primaries == 'bt2020':
+                    # HDR movie content
+                    output_video_path = os.path.join(output_dir, f"{mf.standardized_id}_2K-HDR_Q19-ffmpeg.mkv")
+                    encode_cmd.extend([
+                        "-an", "-sn", 
+                        "-vf", "scale=1920:1080:flags=spline:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1", 
+                        "-c:v", "libx265", 
+                        "-profile:v", "main10", 
+                        "-pix_fmt", "yuv420p10le", 
+                        "-x265-params", "vbv-maxrate=10000:vbv-bufsize=5000:deblock=-3,-3:open-gop=0:early-skip=0:b-intra=0", 
+                        "-crf", "19", 
+                        "-preset", "medium",
+                        output_video_path])
+                else:
+                    # SDR movie content
+                    output_video_path = os.path.join(output_dir, f"{mf.standardized_id}_2K-SDR_Q21-ffmpeg.mkv")
+                    encode_cmd.extend([
+                        "-an", "-sn", 
+                        "-vf", "scale=1920:1080:flags=spline:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1", 
+                        "-c:v", "libx265", 
+                        "-profile:v", "main10", 
+                        "-pix_fmt", "yuv420p10le", 
+                        "-x265-params", "vbv-maxrate=10000:vbv-bufsize=5000:deblock=-3,-3:open-gop=0:early-skip=0:b-intra=0", 
+                        "-crf", "21", 
+                        "-preset", "medium",
+                        output_video_path])
+
+        print(f"Encoding command: {encode_cmd}")
+        confirm_step2 = input("Proceed to Step 2 (Video encoding )? (y/n): ").lower()
         if confirm_step2 == 'y':
-            # --- Step 2: Final Muxing ---
-            print(f"\nStep 2: Final Muxing...")
+            print(f"Encoding command: {encode_cmd}")
+            subprocess.run(encode_cmd, check=True)
+            extracted_files.append(output_video_path)
+
+        confirm_step3 = input("Proceed to Step 3 (Final Muxing)? (y/n): ").lower()
+        if confirm_step3 == 'y':
+            # --- Step 3: Final Muxing ---
+            print(f"\nStep 3: Final Muxing...")
+                
             # Use the original path as the output for mkvmerge
             mux_cmd = [config.get_executable("mkvmerge"), "-o", f"{mf.path}.mkv"]
             
@@ -402,7 +519,7 @@ def main():
                     os.remove(f)
             print(f"Successfully converted to {mf.path}.mkv")
         else:
-            print("Skipping Step 2.")
+            print("Skipping Step 3.")
             # Cleanup extracted files if skipped
             for f in extracted_files:
                 if os.path.exists(f):
@@ -435,9 +552,12 @@ def parse_filename(filename: str) -> tuple[str, str]:
         else:
             base_name_part = name
             
-        # Standardize the ID format: BaseName_SXXEXX
+        # Standardize the ID format: BaseName_SXXEXX\n
         # Replace dots/spaces with hyphens in the base part, and ensure no trailing/leading separators
         base_name_sanitized = re.sub(r'[.\s]+', '-', base_name_part).strip('-')
+
+        # Capitalize the first letter of each word in the base name part (e.g., "futurama" -> "Futurama")
+        base_name_sanitized = '-'.join(word.capitalize() for word in base_name_sanitized.split('-'))
         standardized_id: str = f"{base_name_sanitized}_S{series_match.group(1).zfill(2)}E{series_match.group(2).zfill(2)}"
         return standardized_id, "Series"
     else:
@@ -445,14 +565,26 @@ def parse_filename(filename: str) -> tuple[str, str]:
         # Simple ID: Replace dots and spaces with underscores, and append the extension
         # This aims to match the test expectation of using underscores for separation and including the extension.
         base_name_sanitized = re.sub(r'[.\s]+', '_', name)
+
         # Clean up any remaining characters that are not alphanumeric or underscore
         base_name_sanitized = re.sub(r'[^\w_]+', '', base_name_sanitized)
-        
-        # Append extension if it exists
-        if ext:
-            standardized_id = f"{base_name_sanitized}_{ext}"
+
+        # Extract the year (4 digits) if present, otherwise just use the base name
+        year_match = re.search(r'(\d{4})', name)
+        if year_match:
+            year = year_match.group(1)
+
+            # Remove the year from the base name to avoid duplication
+            base_name_sanitized = base_name_sanitized.replace(year, '').strip('_')
+
+            # Reconstruct the ID: BaseName_Year
+            standardized_id = f"{base_name_sanitized}_{year}"
         else:
-            standardized_id = base_name_sanitized
+            # Append extension if it exists
+            if ext:
+                standardized_id = f"{base_name_sanitized}_{ext}"
+            else:
+                standardized_id = base_name_sanitized
 
         return standardized_id, "Movie"
 
