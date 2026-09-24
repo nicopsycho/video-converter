@@ -483,49 +483,107 @@ def main():
             subprocess.run(encode_cmd, check=True)
             extracted_files.append(output_video_path)
 
+        # --- Step 3: Final Muxing ---
+        print("Step 3: Final Muxing...")
+        
+        # Determine the format string (e.g., HEVC-720) - this would ideally be parsed from the encoded video file name
+        # For this implementation, we'll assume a placeholder or logic to extract it.
+            
+        if mf.media_type == "Series":
+            # Series: Encode to 720p HEVC
+            video_format = "HEVC-720"
+        else:
+            color_primaries = video_stream.get('color_primaries', 'bt709')
+            if color_primaries == 'bt2020':
+                video_format = "2K-HDR"
+            else:
+                video_format = "2K-SDR"
+        
+        # Build the output filename: {standardized_id}_[{video_format}_{lang1}-{lang2}].mkv
+        # Example: Futurama_S11E08_[HEVC-720_FRE-ENG].mkv
+        # We need to collect the language codes for the tracks being included.
+        langs_to_include = []
+        for track in selected_a:
+            langs_to_include.append(track.get('language', 'und'))
+        for track in selected_s:
+            langs_to_include.append(track.get('language', 'und'))
+        
+        # Unique and sorted language codes for the filename
+        unique_langs = sorted(set(langs_to_include))
+        lang_str = "-".join(unique_langs)
+        output_filename = f"{media_file.standardized_id}_[{video_format}_{lang_str.upper()}].mkv"
+        output_path = os.path.join(os.path.dirname(mf.path), output_filename)
+
+        # Construct the mkvmerge command
+        # Example: mkvmerge --output ... --no-track-tags --no-global-tags --language 0:und ... (input_file) ...
+        command = [
+            config.get_executable("mkvmerge"),
+            "-o", output_path,
+            "--no-track-tags",
+            "--no-global-tags",
+            "--color-matrix-coefficients", "0:1",
+            "--color-range", "0:1",
+            "--color-transfer-characteristics", "0:1",
+            "--color-primaries", "0:1",
+            "--compression", "0:none",
+            f"({mf.path})"
+        ]
+
+        # Add the extracted files to the command with their specific parameters
+        # We iterate through the extracted_files which contains the paths to the audio and subtitle files
+        for i, file_path in enumerate(extracted_files):
+            # This part needs to map the file to its specific parameters (language, track-name, etc.)
+            # Based on the user's example:
+            # --language 0:fr --compression 0:none (path)
+            # --language 0:fr --track-name 0:Forced --forced-display-flag 0:yes --compression 0:none (path)
+            # --language 0:fr --track-name 0:Complet --compression 0:none (path)
+            # --language 0:en --compression 0:none (path)
+            
+            # Logic to determine parameters based on the file's purpose (audio, subtitle, forced, etc.)
+            # This is a simplified version of the requested logic:
+            if file_path.endswith('.aac.m4a'):
+                # Audio track
+                # Extract language from filename (e.g., "en", "jp", "ko", "ru")
+                # This assumes the filename contains the language code before the suffix
+                lang = "en"
+                for code in ["fr", "en", "jp", "ko", "ru", "zh", "es", "de", "it", "pt"]:
+                    if code in file_path:
+                        lang = code
+                        break
+                command.extend(["--no-global-tags:", "--no-chapters", 
+                                "--language", f"0:{lang}", 
+                                "--compression", "0:none", f"({file_path})"])
+                
+            elif file_path.endswith('.srt') or file_path.endswith('.ass'):
+                # Subtitle track
+                if "fre_f" in file_path:
+                    command.extend(["--language", "0:fr", 
+                                    "--track-name", "0:Forced", 
+                                    "--forced-display-flag", "0:yes", 
+                                    "--compression", "0:none", f"({file_path})"])
+                elif "fre" in file_path:
+                    command.extend(["--language", "0:fr", 
+                                    "--track-name", "0:Complet", 
+                                    "--compression", "0:none", f"({file_path})"])
+                else:
+                    command.extend(["--language", "0:en", 
+                                    "--compression", "0:none", f"({file_path})"])
+
+        print(f"Final Muxing command: {' '.join(command)}")
         confirm_step3 = input("Proceed to Step 3 (Final Muxing)? (y/n): ").lower()
         if confirm_step3 == 'y':
-            # --- Step 3: Final Muxing ---
-            print(f"\nStep 3: Final Muxing...")
-                
-            # Use the original path as the output for mkvmerge
-            mux_cmd = [config.get_executable("mkvmerge"), "-o", f"{mf.path}.mkv"]
             
-            # Add the extracted files to the muxing command
-            # Note: mkvmerge -o output.mkv file1 file2 ...
-            # We need to be careful about the order. Usually, we want the original file as the base if possible, 
-            # but since we are extracting, we just mux the extracted files.
-            # However, the user's previous logic was to mux the original file with selected tracks.
-            # Since we extracted them, we should mux the extracted files into the final mkv.
-            
-            # To maintain the original file's structure as much as possible, 
-            # we'll use the extracted video as the primary source.
-            
-            # Let's find the extracted video file
-            video_extracted = next((f for f in extracted_files if "_video.mkv" in f), None)
-            if video_extracted:
-                mux_cmd.append(video_extracted)
-            
-            # Add all other extracted files
-            for f in extracted_files:
-                if f != video_extracted:
-                    mux_cmd.append(f)
-            
-            subprocess.run(mux_cmd, check=True)
-            
-            # Cleanup
-            for f in extracted_files:
-                if os.path.exists(f):
-                    os.remove(f)
-            print(f"Successfully converted to {mf.path}.mkv")
-        else:
-            print("Skipping Step 3.")
-            # Cleanup extracted files if skipped
-            for f in extracted_files:
-                if os.path.exists(f):
-                    #os.remove(f)
-                    pass
-            break
+            try:
+                subprocess.run(command, check=True, capture_output=True, text=True)
+                print(f"Conversion successful! Output saved to {output_path}")
+                return output_path
+            except subprocess.CalledProcessError as e:
+                print(f"Conversion failed with error code {e.returncode}.")
+                print(f"STDOUT: {e.stdout}")
+                print(f"STDERR: {e.stderr}")
+                raise RuntimeError(f"Conversion pipeline failed: {e.stderr}")
+            except FileNotFoundError:
+                raise RuntimeError("mkvmerge executable not found. Ensure it is installed and in your PATH.")
             
 
 
