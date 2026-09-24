@@ -4,11 +4,16 @@ import platform
 import re
 import subprocess
 import typing
+import sys
+from filelock import FileLock
 
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+LOCK_FILE = os.path.join(os.getcwd(), ".video_converter.lock")
+lock = FileLock(LOCK_FILE)
 
 LINUX_EXECUTABLE_PATHS = {
     "ffprobe": "/mnt/g/TOOLS/ffmpeg/bin/ffprobe.exe",
@@ -23,7 +28,7 @@ WINDOWS_EXECUTABLE_PATHS = {
     "ffmpeg": "G:\\TOOLS\\ffmpeg\\bin\\ffmpeg.exe",
     "eac3to": "G:\\TOOLS\\eac3to\\eac3to.exe",
     "seconv": "G:\\TOOLS\\SubtitleEdit\\seconv.exe",
-    "mkvmerge": "G:\\TOOLS\\MKVToolNix\\mkvmerge.exe"
+    "mkvmerge": "C:\\Program Files\\MKVToolNix\\mkvmerge.exe"
 }
 
 LINUX_MEDIA_SCAN_PATHS = [
@@ -163,9 +168,21 @@ def get_original_language(config: Config, standardized_id: str, media_type: str,
 # --- Main Application ---
 def main():
     """Main entry point for the CLI video converter."""
-    config = Config()
-    media_files: list[MediaFile] = []
     
+    if lock.is_locked:
+        print("Error: Another instance of the video converter is already running.")
+        sys.exit(1)
+
+    with lock:
+        run_conversion_pipeline()
+
+
+def run_conversion_pipeline():
+    """
+    Main conversion pipeline that scans for media files, extracts streams, encodes video, and muxes final output.
+    """
+    config = Config()
+
     # Scan media files
     scan_dir: str = config.scan_paths[0] if config.scan_paths else os.getcwd()
     print(f"Scanning directory: {scan_dir}")
@@ -174,26 +191,70 @@ def main():
         print(f"Error: Scan directory not found at {scan_dir}")
         return
 
-    for filename in os.listdir(scan_dir):
-        if filename.endswith(('.mkv', '.mp4', '.avi')):
-            file_path: str = os.path.join(scan_dir, filename)
-            
-            # 1. Parse filename
-            standardized_id, media_type = parse_filename(filename)
-            
-            # 2. Extract stream info
-            metadata: dict[str, typing.Any] = extract_stream_info(file_path)
-            
-            if metadata:
-                # 3. Create MediaFile object
-                media_file = MediaFile(file_path, standardized_id, media_type, metadata)
-                # Fetch original language
-                media_file.original_language = get_original_language(config, media_file.standardized_id, media_file.media_type, media_file.metadata)
-                media_files.append(media_file)
+    media_files: list[MediaFile] = []
+    for root, dirs, files in os.walk(scan_dir):
+        for filename in files:
+            if filename.endswith(('.mkv', '.mp4', '.avi')):
+                file_path: str = os.path.join(root, filename)
+                
+                if "ffmpeg" in filename:  
+                    # Skip files that are already processed or contain 'ffmpeg' in their name
+                    continue
+
+                standardized_id, media_type = parse_filename(filename)
+                
+                # 2. Extract stream info
+                metadata: dict[str, typing.Any] = extract_stream_info(file_path)
+                
+                if metadata:
+                    # 3. Create MediaFile object
+                    media_file = MediaFile(file_path, standardized_id, media_type, metadata)
+                    # Fetch original language
+                    media_file.original_language = get_original_language(config, media_file.standardized_id, media_file.media_type, media_file.metadata)
+                    media_files.append(media_file)
 
     if not media_files:
         print("No media files found in the current directory.")
         return
+
+    # --- Organization Logic ---
+    for mf in media_files:
+        parent_dir = os.path.dirname(mf.path)
+        # Check if the file is directly in the scan directory (root of scan dir)
+        if parent_dir == scan_dir:
+            if mf.media_type == "Movie":
+                # Movies: Move to folder named after the movie name including the year
+                # standardized_id for movies is "BaseName_Year" or "BaseName_Ext"
+                # We'll use the standardized_id as the folder name
+                new_folder = os.path.join(scan_dir, mf.standardized_id)
+                if not os.path.exists(new_folder):
+                    os.makedirs(new_folder)
+                
+                new_path = os.path.join(new_folder, os.path.basename(mf.path))
+                os.rename(mf.path, new_path)
+                # Update the path in the object
+                mf.path = new_path
+                print(f"Moved movie to: {new_folder}")
+            
+            elif mf.media_type == "Series":
+                # Series: Group inside a folder named with the series root name excluding episode number but including season
+                # standardized_id for series is "BaseName_SXXEXX"
+                # We want "BaseName_SXX"
+                series_match = re.search(r'(.+)_S(\d{2})E(\d{2})', mf.standardized_id)
+                if series_match:
+                    base_name = series_match.group(1)
+                    season = series_match.group(2)
+                    folder_name = f"{base_name}_S{season}"
+                    new_folder = os.path.join(scan_dir, folder_name)
+                    
+                    if not os.path.exists(new_folder):
+                        os.makedirs(new_folder)
+                    
+                    new_path = os.path.join(new_folder, os.path.basename(mf.path))
+                    os.rename(mf.path, new_path)
+                    # Update the path in the object
+                    mf.path = new_path
+                    print(f"Moved series to: {new_folder}")
 
     print(f"Found {len(media_files)} media files:")
     for i, mf in enumerate(media_files):
@@ -429,10 +490,13 @@ def main():
         if confirm_step1 in ('y', ''):
             subprocess.run(extract_cmd, check=True)
 
-        # Convert audio tracks to AAC using eac3to
-        audio_files_to_convert = [f for f in extracted_files if f.endswith('.flac')]
-        for flac_file in audio_files_to_convert:
-            aac_file = flac_file.replace('.flac', '.aac.m4a')
+        print(f"Step 2: Converting audio tracks to AAC...")
+        confirm_step2 = input("Proceed to Step 2 (Audio Conversion)? (Y/n): ").lower()
+        if confirm_step2 in ('y', ''):
+            # Convert audio tracks to AAC using eac3to
+            audio_files_to_convert = [f for f in extracted_files if f.endswith('.flac')]
+            for flac_file in audio_files_to_convert:
+                aac_file = flac_file.replace('.flac', '.aac.m4a')
             
             # Determine eac3to arguments based on media type and channel count
             # We need to check the channel count of the original audio stream
@@ -468,8 +532,8 @@ def main():
             # Update the list of files to be muxed to use the new AAC file
             extracted_files = [aac_file if f == flac_file else f for f in extracted_files]
         
-        # --- Step 2: Video Encoding ---
-        print("Step 2: Video Encoding...")
+        # --- Step 3: Video Encoding ---
+        print("Step 3: Video Encoding...")
 
         # Take the source media file and encode it based on the media type
         # and the color primaries of the video stream.
@@ -479,7 +543,7 @@ def main():
                       "-loglevel", "error", 
                       "-stats", "-i", mf.path]
 
-        video_stream = next((s for s in streams if s['codec_type'] == 'video'), None)
+        video_stream = next((s for s in streams if s.get('codec_type') == 'video'), None)
         if video_stream:
             if mf.media_type == "Series":
                 # Series: Encode to 720p HEVC
@@ -522,14 +586,14 @@ def main():
                         output_video_path])
 
         print(f"Encoding command: {encode_cmd}")
-        confirm_step2 = input("Proceed to Step 2 (Video encoding )? (Y/n): ").lower()
-        if confirm_step2 in ('y', ''):
+        confirm_step3 = input("Proceed to Step 3 (Video encoding )? (Y/n): ").lower()
+        if confirm_step3 in ('y', ''):
             print(f"Encoding command: {encode_cmd}")
             subprocess.run(encode_cmd, check=True)
             extracted_files.append(output_video_path)
 
-        # --- Step 3: Final Muxing ---
-        print("Step 3: Final Muxing...")
+        # --- Step 4: Final Muxing ---
+        print("Step 4: Final Muxing...")
         
         # Determine the format string (e.g., HEVC-720) - this would ideally be parsed from the encoded video file name
         # For this implementation, we'll assume a placeholder or logic to extract it.
@@ -548,16 +612,19 @@ def main():
         # Example: Futurama_S11E08_[HEVC-720_FRE-ENG].mkv
         # We need to collect the language codes for the tracks being included.
         langs_to_include = []
-        for track in selected_a:
-            langs_to_include.append(track.get('language', 'und'))
-        for track in selected_s:
-            langs_to_include.append(track.get('language', 'und'))
+        for a_idx in selected_a:
+            a_stream = streams[a_idx]
+            langs_to_include.append(a_stream.get('language', 'und'))
+        for s_idx in selected_s:
+            s_stream = streams[s_idx]
+            langs_to_include.append(s_stream.get('language', 'und'))
         
         # Unique and sorted language codes for the filename (French first)
         unique_langs = sorted(set(langs_to_include), key=lambda x: (x.lower() not in ['fre', 'fra'], x))
         lang_str = "-".join(unique_langs)
         output_filename = f"{media_file.standardized_id}_[{video_format}_{lang_str.upper()}].mkv"
-        output_path = os.path.join(os.path.dirname(mf.path), output_filename)
+        output_path = os.path.join(os.path.dirname(mf.path), output_filename).replace("__", "_")
+
 
         # Construct the mkvmerge command
         # Example: mkvmerge --output ... --no-track-tags --no-global-tags --language 0:und ... (input_file) ...
@@ -571,7 +638,7 @@ def main():
             "--color-transfer-characteristics", "0:1",
             "--color-primaries", "0:1",
             "--compression", "0:none",
-            f"({mf.path})"
+            f"{output_video_path}"
         ]
 
         # Add the extracted files to the command with their specific parameters
@@ -583,11 +650,11 @@ def main():
                 command.extend(["--no-global-tags:", "--no-chapters", 
                                 "--language", "0:fr", 
                                 "--track-name", "0:Quebecquois", 
-                                "--compression", "0:none", f"({file_path})"])
+                                "--compression", "0:none", f"{file_path}"])
             elif "fr" in file_path and file_path.endswith('.aac.m4a'):
                 command.extend(["--no-global-tags:", "--no-chapters", 
                                 "--language", "0:fr", 
-                                "--compression", "0:none", f"({file_path})"])
+                                "--compression", "0:none", f"{file_path}"])
 
         # 2. Original/Other Audio
         for file_path in extracted_files:
@@ -596,7 +663,7 @@ def main():
                 lang = lang_match.group(1) if lang_match else "en"
                 command.extend(["--no-global-tags:", "--no-chapters", 
                                 "--language", f"0:{lang}", 
-                                "--compression", "0:none", f"({file_path})"])
+                                "--compression", "0:none", f"{file_path}"])
 
         # 3. Subtitles
         for file_path in extracted_files:
@@ -605,18 +672,18 @@ def main():
                     command.extend(["--language", "0:fr", 
                                     "--track-name", "0:Forced", 
                                     "--forced-display-flag", "0:yes", 
-                                    "--compression", "0:none", f"({file_path})"])
+                                    "--compression", "0:none", f"{file_path}"])
                 elif "fre" in file_path:
                     command.extend(["--language", "0:fr", 
                                     "--track-name", "0:Complet", 
-                                    "--compression", "0:none", f"({file_path})"])
+                                    "--compression", "0:none", f"{file_path}"])
                 else:
                     command.extend(["--language", "0:en", 
-                                    "--compression", "0:none", f"({file_path})"])
+                                    "--compression", "0:none", f"{file_path}"])
 
         print(f"Final Muxing command: {' '.join(command)}")
-        confirm_step3 = input("Proceed to Step 3 (Final Muxing)? (Y/n): ").lower()
-        if confirm_step3 in ('y', ''):
+        confirm_step4 = input("Proceed to Step 4 (Final Muxing)? (Y/n): ").lower()
+        if confirm_step4 in ('y', ''):
             try:
                 subprocess.run(command, check=True, capture_output=True, text=True)
                 print(f"Conversion successful! Output saved to {output_path}")
@@ -628,10 +695,6 @@ def main():
                 raise RuntimeError(f"Conversion pipeline failed: {e.stderr}")
             except FileNotFoundError:
                 raise RuntimeError("mkvmerge executable not found. Ensure it is installed and in your PATH.")
-            
-
-
-
 
 
 # --- Utility Functions (To be implemented) ---
@@ -751,103 +814,6 @@ def extract_stream_info(file_path: str) -> dict[str, typing.Any]:
         print(f"Error decoding JSON output from ffprobe for {file_path}.")
         return {}
 
-def run_conversion_pipeline(media_file: MediaFile, selected_streams: dict[str, typing.Any]) -> str:
-    """
-    Orchestrates audio, subtitle, video, and muxing based on selected streams.
-    
-    Args:
-        media_file: The MediaFile object containing metadata and selection state.
-        selected_streams: Placeholder for potential future stream selection data (currently unused, relying on media_file state).
-        
-    Returns:
-        The path to the final converted/muxed file.
-    """
-    if not media_file.selected_video_tracks and not media_file.selected_audio_tracks and not media_file.selected_subtitle_tracks:
-        raise ValueError("No streams selected for conversion. Please select at least one stream.")
-
-    # 1. Determine output filename
-    base_name: str = media_file.standardized_id
-    output_path: str = f"{base_name}_converted.mkv"
-    
-    print(f"--- Starting Conversion Pipeline for {os.path.basename(media_file.path)} ---")
-    print(f"Target Output: {output_path}")
-    print(f"Selected Video Tracks: {media_file.selected_video_tracks}")
-    print(f"Selected Audio Tracks: {media_file.selected_audio_tracks}")
-    print(f"Selected Subtitle Tracks: {media_file.selected_subtitle_tracks}")
-
-    # 2. Build the command list by mapping selected tracks to stream IDs
-    
-    def _find_stream_id(media_file: MediaFile, track_name: str, stream_type: str) -> int | None:
-        """Finds the stream index (ID) matching the track name and type."""
-        streams = media_file.metadata.get('streams', [])
-        for stream in streams:
-            if stream.get('codec_type') == stream_type \
-                    and (track_name.lower() in stream.get('codec_name', '').lower() \
-                    or track_name.lower() in stream.get('tags', {}).get('language', '').lower()):
-                return stream.get('index')
-        return None
-
-    video_ids: list[str] = []
-    audio_ids: list[str] = []
-    subtitle_ids: list[str] = []
-
-    # Map selected video tracks
-    for track_name in media_file.selected_video_tracks:
-        stream_id: int | None = _find_stream_id(media_file, track_name, 'video')
-        if stream_id is not None:
-            video_ids.append(str(stream_id))
-        else:
-            print(f"Warning: Could not find video stream ID for track: {track_name}")
-
-    # Map selected audio tracks
-    for track_name in media_file.selected_audio_tracks:
-        stream_id: int | None = _find_stream_id(media_file, track_name, 'audio')
-        if stream_id is not None:
-            audio_ids.append(str(stream_id))
-        else:
-            print(f"Warning: Could not find audio stream ID for track: {track_name}")
-
-    # Map selected subtitle tracks
-    for track_name in media_file.selected_subtitle_tracks:
-        stream_id: int | None = _find_stream_id(media_file, track_name, 'subtitle')
-        if stream_id is not None:
-            subtitle_ids.append(str(stream_id))
-        else:
-            print(f"Warning: Could not find subtitle stream ID for track: {track_name}")
-
-    # Construct the mkvmerge command
-    command: list[str] = [
-        "mkvmerge",
-        "-o", output_path,
-        # -v <video_stream_id> -a <audio_stream_id> -s <subtitle_stream_id> <input_file>
-    ]
-    
-    if video_ids:
-        command.extend(["-v", ",".join(video_ids)])
-    if audio_ids:
-        command.extend(["-a", ",".join(audio_ids)])
-    if subtitle_ids:
-        command.extend(["-s", ",".join(subtitle_ids)])
-        
-    command.append(media_file.path)
-
-    print(f"Executing command: {' '.join(command)}")
-
-    print(f"Executing command: {' '.join(command)}")
-    
-    try:
-        # Execute the command
-        # NOTE: In a production environment, error handling and stream ID mapping would be critical here.
-        subprocess.run(command, check=True, capture_output=True, text=True)
-        print(f"Conversion successful! Output saved to {output_path}")
-        return output_path
-    except subprocess.CalledProcessError as e:
-        print(f"Conversion failed with error code {e.returncode}.")
-        print(f"STDOUT: {e.stdout}")
-        print(f"STDERR: {e.stderr}")
-        raise RuntimeError(f"Conversion pipeline failed: {e.stderr}")
-    except FileNotFoundError:
-        raise RuntimeError("mkvmerge executable not found. Ensure it is installed and in your PATH.")
 
 # --- Main Execution Block ---
 if __name__ == "__main__":

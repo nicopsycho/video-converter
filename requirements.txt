@@ -1,3 +1,6 @@
 textual
 pytest
-# Add other dependencies like pydantic, etc., as needed
+requests
+python-dotenv
+filelock
+
