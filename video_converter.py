@@ -4,7 +4,6 @@ import platform
 import re
 import subprocess
 import typing
-from typing import Optional
 
 import requests
 from dotenv import load_dotenv
@@ -34,6 +33,9 @@ LINUX_MEDIA_SCAN_PATHS = [
 WINDOWS_MEDIA_SCAN_PATHS = [
     "D:\\todo",
 ]
+
+# We'll store lookups in a JSON file to avoid redundant API calls.
+CACHE_FILE = os.path.join(os.getcwd(), ".tmdb_cache.json")
 
 # --- Configuration and Platform Detection ---
 class Config:
@@ -82,19 +84,43 @@ class MediaFile:
         self.standardized_id: str = standardized_id
         self.media_type: str = media_type # 'Series' or 'Movie'
         self.metadata: dict[str, typing.Any] = metadata # Contains all ffprobe data
-        self.original_language: Optional[str] = None
+        self.original_language: str | None = None
         self.selected_audio_tracks: list[str] = []
         self.selected_subtitle_tracks: list[str] = []
         self.selected_video_tracks: list[str] = []
 
+# --- Cache Configuration ---
+
+def load_cache() -> dict:
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+def save_cache(cache: dict):
+    try:
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=4)
+    except OSError as e:
+        print(f"Error saving cache: {e}")
+
 # --- Helper Functions ---
-def get_original_language(config: Config, standardized_id: str, media_type: str, metadata: dict[str, typing.Any]) -> Optional[str]:
+def get_original_language(config: Config, standardized_id: str, media_type: str, metadata: dict[str, typing.Any]) -> str | None:
     """
-    Attempts to fetch the original language from TMDB.
+    Attempts to fetch the original language from TMDB with local caching.
     """
     if not config.tmdb_api_key:
         print("Warning: No TMDB API key configured. Skipping language lookup.")
         return None
+
+    cache = load_cache()
+    
+    # Check if we already have a result in the cache
+    if standardized_id in cache:
+        return cache[standardized_id].get("original_language")
 
     # Fallback logic: if there are 2 audio languages, assume the non-French one is the original.
     audio_streams = [s for s in metadata.get('streams', []) if s.get('codec_type') == 'audio']
@@ -107,13 +133,32 @@ def get_original_language(config: Config, standardized_id: str, media_type: str,
 
     print(f"Attempting to lookup original language for {media_type}: {standardized_id}...")
     
-    # Placeholder for actual API calls
-    # Example: 
-    # if media_type == 'Movie':
-    #     resp = requests.get(f"https://api.tmdb.org/3/movie/{standardized_id}", params={"api_key": config.tmdb_api_key})
-    #     ...
+    try:
+        # Actual TMDB API call
+        endpoint = f"https://api.tmdb.org/3/{media_type.lower()}/{standardized_id}"
+        response = requests.get(endpoint, params={"api_key": config.tmdb_api_key}, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # TMDB usually provides 'original_language' in the response
+            original_lang = data.get("original_language")
+            
+            if original_lang:
+                # Update and save cache
+                cache[standardized_id] = {
+                    "name": data.get("title") or data.get("name"),
+                    "original_language": original_lang
+                }
+                save_cache(cache)
+                return original_lang
+        else:
+            print(f"TMDB API returned status {response.status_code} for {standardized_id}")
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Error connecting to TMDB: {e}")
     
-    return "en" # Defaulting to English for now as a placeholder
+    return "en" # Defaulting to English if lookup fails
+
 
 # --- Main Application ---
 def main():
@@ -380,8 +425,8 @@ def main():
 
         print(f"\nStep 1: Extracting selected streams from {os.path.basename(mf.path)}...")
         print(f"Extraction command: {extract_cmd}")
-        confirm_step1 = input("Proceed to Step 1 (Extraction)? (y/n): ").lower()
-        if confirm_step1 == 'y':
+        confirm_step1 = input("Proceed to Step 1 (Extraction)? (Y/n): ").lower()
+        if confirm_step1 in ('y', ''):
             subprocess.run(extract_cmd, check=True)
 
         # Convert audio tracks to AAC using eac3to
@@ -424,7 +469,7 @@ def main():
             extracted_files = [aac_file if f == flac_file else f for f in extracted_files]
         
         # --- Step 2: Video Encoding ---
-        print(f"\nStep 2: Video Encoding...")
+        print("Step 2: Video Encoding...")
 
         # Take the source media file and encode it based on the media type
         # and the color primaries of the video stream.
@@ -477,8 +522,8 @@ def main():
                         output_video_path])
 
         print(f"Encoding command: {encode_cmd}")
-        confirm_step2 = input("Proceed to Step 2 (Video encoding )? (y/n): ").lower()
-        if confirm_step2 == 'y':
+        confirm_step2 = input("Proceed to Step 2 (Video encoding )? (Y/n): ").lower()
+        if confirm_step2 in ('y', ''):
             print(f"Encoding command: {encode_cmd}")
             subprocess.run(encode_cmd, check=True)
             extracted_files.append(output_video_path)
@@ -508,8 +553,8 @@ def main():
         for track in selected_s:
             langs_to_include.append(track.get('language', 'und'))
         
-        # Unique and sorted language codes for the filename
-        unique_langs = sorted(set(langs_to_include))
+        # Unique and sorted language codes for the filename (French first)
+        unique_langs = sorted(set(langs_to_include), key=lambda x: (x.lower() not in ['fre', 'fra'], x))
         lang_str = "-".join(unique_langs)
         output_filename = f"{media_file.standardized_id}_[{video_format}_{lang_str.upper()}].mkv"
         output_path = os.path.join(os.path.dirname(mf.path), output_filename)
@@ -531,31 +576,31 @@ def main():
 
         # Add the extracted files to the command with their specific parameters
         # We iterate through the extracted_files which contains the paths to the audio and subtitle files
-        for i, file_path in enumerate(extracted_files):
-            # This part needs to map the file to its specific parameters (language, track-name, etc.)
-            # Based on the user's example:
-            # --language 0:fr --compression 0:none (path)
-            # --language 0:fr --track-name 0:Forced --forced-display-flag 0:yes --compression 0:none (path)
-            # --language 0:fr --track-name 0:Complet --compression 0:none (path)
-            # --language 0:en --compression 0:none (path)
-            
-            # Logic to determine parameters based on the file's purpose (audio, subtitle, forced, etc.)
-            # This is a simplified version of the requested logic:
-            if file_path.endswith('.aac.m4a'):
-                # Audio track
-                # Extract language from filename (e.g., "en", "jp", "ko", "ru")
-                # This assumes the filename contains the language code before the suffix
-                lang = "en"
-                for code in ["fr", "en", "jp", "ko", "ru", "zh", "es", "de", "it", "pt"]:
-                    if code in file_path:
-                        lang = code
-                        break
+        
+        # 1. French Audio
+        for file_path in extracted_files:
+            if "frq" in file_path:
+                command.extend(["--no-global-tags:", "--no-chapters", 
+                                "--language", "0:fr", 
+                                "--track-name", "0:Quebecquois", 
+                                "--compression", "0:none", f"({file_path})"])
+            elif "fr" in file_path and file_path.endswith('.aac.m4a'):
+                command.extend(["--no-global-tags:", "--no-chapters", 
+                                "--language", "0:fr", 
+                                "--compression", "0:none", f"({file_path})"])
+
+        # 2. Original/Other Audio
+        for file_path in extracted_files:
+            if file_path.endswith('.aac.m4a') and "fr" not in file_path and "frq" not in file_path:
+                lang_match = re.search(r'([a-z]{3})\.aac\.m4a$', file_path)
+                lang = lang_match.group(1) if lang_match else "en"
                 command.extend(["--no-global-tags:", "--no-chapters", 
                                 "--language", f"0:{lang}", 
                                 "--compression", "0:none", f"({file_path})"])
-                
-            elif file_path.endswith('.srt') or file_path.endswith('.ass'):
-                # Subtitle track
+
+        # 3. Subtitles
+        for file_path in extracted_files:
+            if file_path.endswith(('.srt', '.ass')):
                 if "fre_f" in file_path:
                     command.extend(["--language", "0:fr", 
                                     "--track-name", "0:Forced", 
@@ -570,9 +615,8 @@ def main():
                                     "--compression", "0:none", f"({file_path})"])
 
         print(f"Final Muxing command: {' '.join(command)}")
-        confirm_step3 = input("Proceed to Step 3 (Final Muxing)? (y/n): ").lower()
-        if confirm_step3 == 'y':
-            
+        confirm_step3 = input("Proceed to Step 3 (Final Muxing)? (Y/n): ").lower()
+        if confirm_step3 in ('y', ''):
             try:
                 subprocess.run(command, check=True, capture_output=True, text=True)
                 print(f"Conversion successful! Output saved to {output_path}")
