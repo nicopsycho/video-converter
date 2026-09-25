@@ -139,30 +139,36 @@ def get_original_language(config: Config, standardized_id: str, media_type: str,
     print(f"Attempting to lookup original language for {media_type}: {standardized_id}...")
     
     try:
-        # Actual TMDB API call
-        endpoint = f"https://api.tmdb.org/3/{media_type.lower()}/{standardized_id}"
-        response = requests.get(endpoint, params={"api_key": config.tmdb_api_key}, timeout=10)
+        # Use the search endpoint instead of the direct series endpoint for better reliability
+        # This will return a list of results matching the base name
+        base_name_only = standardized_id.split('_S')[0]
+        search_query = base_name_only.replace('_', ' ').replace('-', ' ')
+        endpoint = f"https://api.tmdb.org/3/search/{media_type.lower()}"
+        print(f"Attempting to query: {search_query}")
+        response = requests.get(endpoint, params={"api_key": config.tmdb_api_key, "query": search_query}, timeout=10)
         
         if response.status_code == 200:
-            data = response.json()
-            # TMDB usually provides 'original_language' in the response
-            original_lang = data.get("original_language")
-            
-            if original_lang:
-                # Update and save cache
-                cache[standardized_id] = {
-                    "name": data.get("title") or data.get("name"),
-                    "original_language": original_lang
-                }
-                save_cache(cache)
-                return original_lang
+            results = response.json().get("results", [])
+            if results:
+                # Pick the first result as the best match
+                data = results[0]
+                original_lang = data.get("original_language")
+                
+                if original_lang:
+                    # Update and save cache
+                    cache[standardized_id] = {
+                        "name": data.get("title") or data.get("name"),
+                        "original_language": original_lang
+                    }
+                    save_cache(cache)
+                    return original_lang
         else:
             print(f"TMDB API returned status {response.status_code} for {standardized_id}")
             
     except requests.exceptions.RequestException as e:
         print(f"Error connecting to TMDB: {e}")
     
-    return "en" # Defaulting to English if lookup fails
+    return "eng" # Defaulting to English if lookup fails
 
 
 # --- Main Application ---
@@ -173,11 +179,15 @@ def main():
         print("Error: Another instance of the video converter is already running.")
         sys.exit(1)
 
+    # Check for auto mode
+    auto_mode = "--auto" in sys.argv
+    
     with lock:
-        run_conversion_pipeline()
+        run_conversion_pipeline(auto_mode=auto_mode)
 
 
-def run_conversion_pipeline():
+
+def run_conversion_pipeline(auto_mode: bool = False):
     """
     Main conversion pipeline that scans for media files, extracts streams, encodes video, and muxes final output.
     """
@@ -412,8 +422,8 @@ def run_conversion_pipeline():
         
         # We use ffmpeg to extract individual streams into separate files
         # Naming convention:
-        # - Forced: {lang}f.{ext}
-        # - SDH: {lang}h.{ext}
+        # - Forced: {lang}_f.{ext}
+        # - SDH: {lang}_h.{ext}
         # - Full: {lang}.{ext}
         # - Others: {lang}.{ext}
         
@@ -490,7 +500,7 @@ def run_conversion_pipeline():
         if confirm_step1 in ('y', ''):
             subprocess.run(extract_cmd, check=True)
 
-        print(f"Step 2: Converting audio tracks to AAC...")
+        print("\nStep 2: Converting audio tracks to AAC...")
         confirm_step2 = input("Proceed to Step 2 (Audio Conversion)? (Y/n): ").lower()
         if confirm_step2 in ('y', ''):
             # Convert audio tracks to AAC using eac3to
@@ -546,7 +556,7 @@ def run_conversion_pipeline():
 
         
         # --- Step 3: Video Encoding ---
-        print("Step 3: Video Encoding...")
+        print("\nStep 3: Video Encoding...")
 
         # Take the source media file and encode it based on the media type
         # and the color primaries of the video stream.
@@ -599,14 +609,14 @@ def run_conversion_pipeline():
                         output_video_path])
 
         print(f"Encoding command: {encode_cmd}")
-        confirm_step3 = input("Proceed to Step 3 (Video encoding )? (Y/n): ").lower()
+        confirm_step3 = input("\nProceed to Step 3 (Video encoding )? (Y/n): ").lower()
         if confirm_step3 in ('y', ''):
             print(f"Encoding command: {encode_cmd}")
             subprocess.run(encode_cmd, check=True)
             extracted_files.append(output_video_path)
 
         # --- Step 4: Final Muxing ---
-        print("Step 4: Final Muxing...")
+        print("\nStep 4: Final Muxing...")
         
         # Determine the format string (e.g., HEVC-720) - this would ideally be parsed from the encoded video file name
         # For this implementation, we'll assume a placeholder or logic to extract it.
@@ -637,7 +647,6 @@ def run_conversion_pipeline():
         lang_str = "-".join(unique_langs)
         output_filename = f"{media_file.standardized_id}_[{video_format}_{lang_str.upper()}].mkv"
         output_path = os.path.join(os.path.dirname(mf.path), output_filename).replace("__", "_")
-
 
         # Construct the mkvmerge command
         # Example: mkvmerge --output ... --no-track-tags --no-global-tags --language 0:und ... (input_file) ...
@@ -742,6 +751,8 @@ def parse_filename(filename: str) -> tuple[str, str]:
 
         # Capitalize the first letter of each word in the base name part (e.g., "futurama" -> "Futurama")
         base_name_sanitized = '-'.join(word.capitalize() for word in base_name_sanitized.split('-'))
+
+        # Standardize the ID format: BaseName_SXXEXX\n
         standardized_id: str = f"{base_name_sanitized}_S{series_match.group(1).zfill(2)}E{series_match.group(2).zfill(2)}"
         return standardized_id, "Series"
     else:
@@ -792,6 +803,9 @@ def extract_stream_info(file_path: str) -> dict[str, typing.Any]:
 
         all_streams = []
         for stream in data.get('streams', []):
+            if stream.get('codec_type') == 'attachment':
+                continue
+            
             stream_info: dict[str, typing.Any] = {
                 'codec_type': stream.get('codec_type'),
                 'codec_name': stream.get('codec_name'),

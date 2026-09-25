@@ -1,4 +1,3 @@
-textual
 pytest
 requests
 python-dotenv
