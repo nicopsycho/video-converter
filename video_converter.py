@@ -86,7 +86,7 @@ class MediaFile:
     """Represents a discovered media file and its metadata."""
     def __init__(self, path: str, standardized_id: str, media_type: str, metadata: dict[str, typing.Any]) -> None:
         self.path: str = path
-        self.standardized_id: str = standardized_id
+        self.standardized_id: str = standardized_id.replace("__", "_")
         self.media_type: str = media_type # 'Series' or 'Movie'
         self.metadata: dict[str, typing.Any] = metadata # Contains all ffprobe data
         self.original_language: str | None = None
@@ -220,7 +220,10 @@ def run_conversion_pipeline(auto_mode: bool = False):
                     # 3. Create MediaFile object
                     media_file = MediaFile(file_path, standardized_id, media_type, metadata)
                     # Fetch original language
-                    media_file.original_language = get_original_language(config, media_file.standardized_id, media_file.media_type, media_file.metadata)
+                    media_file.original_language = get_original_language(config, 
+                                                                         media_file.standardized_id, 
+                                                                         media_file.media_type, 
+                                                                         media_file.metadata)
                     media_files.append(media_file)
 
     if not media_files:
@@ -496,13 +499,15 @@ def run_conversion_pipeline(auto_mode: bool = False):
 
         print(f"\nStep 1: Extracting selected streams from {os.path.basename(mf.path)}...")
         print(f"Extraction command: {extract_cmd}")
-        confirm_step1 = input("Proceed to Step 1 (Extraction)? (Y/n): ").lower()
-        if confirm_step1 in ('y', ''):
+        if not auto_mode:
+            confirm_step1 = input("Proceed to Step 1 (Extraction)? (Y/n): ").lower()
+        if auto_mode or confirm_step1 in ('y', ''):
             subprocess.run(extract_cmd, check=True)
 
         print("\nStep 2: Converting audio tracks to AAC...")
-        confirm_step2 = input("Proceed to Step 2 (Audio Conversion)? (Y/n): ").lower()
-        if confirm_step2 in ('y', ''):
+        if not auto_mode:
+            confirm_step2 = input("Proceed to Step 2 (Audio Conversion)? (Y/n): ").lower()
+        if auto_mode or confirm_step2 in ('y', ''):
             # Convert audio tracks to AAC using eac3to
             audio_files_to_convert = [f for f in extracted_files if f.endswith('.flac')]
             for flac_file in audio_files_to_convert:
@@ -609,8 +614,9 @@ def run_conversion_pipeline(auto_mode: bool = False):
                         output_video_path])
 
         print(f"Encoding command: {encode_cmd}")
-        confirm_step3 = input("\nProceed to Step 3 (Video encoding )? (Y/n): ").lower()
-        if confirm_step3 in ('y', ''):
+        if not auto_mode:
+            confirm_step3 = input("\nProceed to Step 3 (Video encoding )? (Y/n): ").lower()
+        if auto_mode or confirm_step3 in ('y', ''):
             print(f"Encoding command: {encode_cmd}")
             subprocess.run(encode_cmd, check=True)
             extracted_files.append(output_video_path)
@@ -646,7 +652,7 @@ def run_conversion_pipeline(auto_mode: bool = False):
         unique_langs = sorted(set(langs_to_include), key=lambda x: (x.lower() not in ['fre', 'fra'], x))
         lang_str = "-".join(unique_langs)
         output_filename = f"{media_file.standardized_id}_[{video_format}_{lang_str.upper()}].mkv"
-        output_path = os.path.join(os.path.dirname(mf.path), output_filename).replace("__", "_")
+        output_path = os.path.join(os.path.dirname(mf.path), output_filename)
 
         # Construct the mkvmerge command
         # Example: mkvmerge --output ... --no-track-tags --no-global-tags --language 0:und ... (input_file) ...
@@ -710,8 +716,9 @@ def run_conversion_pipeline(auto_mode: bool = False):
                                     "--compression", "0:none", f"{file_path}"])
 
         print(f"Final Muxing command: {' '.join(command)}")
-        confirm_step4 = input("Proceed to Step 4 (Final Muxing)? (Y/n): ").lower()
-        if confirm_step4 in ('y', ''):
+        if not auto_mode:
+            confirm_step4 = input("Proceed to Step 4 (Final Muxing)? (Y/n): ").lower()
+        if auto_mode or confirm_step4 in ('y', ''):
             try:
                 subprocess.run(command, check=True, capture_output=True, text=True)
                 print(f"Conversion successful! Output saved to {output_path}")
